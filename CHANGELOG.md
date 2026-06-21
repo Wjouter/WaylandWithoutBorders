@@ -6,6 +6,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-06-21
+
+### Added
+- Debian packaging metadata, man page, example config, superficial autopkgtest,
+  and Debian readiness documentation.
+- Public PR checklist items for keeping package metadata and release text free
+  of private workstation details.
+
+### Changed
+- Lowered the Go module baseline to Go 1.22 and dependency versions available
+  in the Debian/Ubuntu packaging path.
+- Updated release package maintainer metadata to use the public GitHub noreply
+  address.
+
 ## [0.4.0] - 2026-06-21
 
 ### Fixed
@@ -183,7 +197,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `scripts/install.sh` one-command installer.
 - GitHub Actions CI/CD: automated test, lint, and `.deb` release pipeline.
 
-[Unreleased]: https://github.com/lucky-verma/mwb-linux/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/lucky-verma/mwb-linux/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/lucky-verma/mwb-linux/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/lucky-verma/mwb-linux/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/lucky-verma/mwb-linux/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/lucky-verma/mwb-linux/compare/v0.1.0...v0.3.0

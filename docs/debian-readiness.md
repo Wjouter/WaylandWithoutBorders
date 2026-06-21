@@ -5,7 +5,7 @@ for Debian upload and later Ubuntu sync.
 
 ## Current status
 
-- Upstream release exists: `v0.4.0`.
+- Upstream release target: `v0.4.1`.
 - License is MIT.
 - Go module has one binary and two external Go dependencies.
 - The module now builds on Go 1.22 with Debian/Ubuntu-packaged dependency
@@ -22,11 +22,10 @@ for Debian upload and later Ubuntu sync.
 
 Use an upstream-first path:
 
-1. Land the Go 1.22 compatibility and Debian packaging changes in a PR.
-2. Cut a small upstream release, likely `v0.4.1`, after CI passes.
-3. Rebuild Debian packaging from the `v0.4.1` orig tarball.
-4. Run lintian against source, binary, and changes artifacts in Debian unstable.
-5. File the ITP only after the source package is clean.
+1. Cut the `v0.4.1` upstream release after CI passes.
+2. Rebuild Debian packaging from the `v0.4.1` orig tarball.
+3. Run lintian against source, binary, and changes artifacts in Debian unstable.
+4. File the ITP only after the source package is clean.
 
 This keeps the Debian package simple. The alternative is to keep `v0.4.0` as
 the orig tarball and carry the Go 1.22 compatibility change as a Debian quilt
@@ -53,7 +52,7 @@ patch, but that is noisier for a first upload.
 - `go test ./...` passed with `/usr/lib/go-1.22/bin/go`.
 - `dpkg-checkbuilddeps` passed against Ubuntu-packaged build dependencies.
 - `dpkg-buildpackage -us -uc -b` produced
-  `mwb-linux_0.4.0-1_amd64.deb`.
+  `mwb-linux_0.4.1-1_amd64.deb`.
 - The Debian build ran package tests through `dh_auto_test`.
 - The built binary is PIE and dynamically linked with generated `libc6`
   dependency.
@@ -61,6 +60,7 @@ patch, but that is noisier for a first upload.
   README/architecture docs, example config, copyright, changelog, and man page.
 - Extracted-package smoke check passed: `mwb -h` prints the expected CLI flags.
 - `uscan --no-download --verbose` successfully detected GitHub tag `v0.4.0`.
+  Re-run against `v0.4.1` after the release is published.
 
 Known verification limits:
 
@@ -68,17 +68,12 @@ Known verification limits:
   lintian documents this as the expected Go/Rust static provenance field. Treat
   this as an Ubuntu-lintian-version warning until checked in Debian unstable.
 - Lintian warns `initial-upload-closes-no-bugs` until a real ITP bug exists.
-- `dpkg-buildpackage -S` is not yet a clean upload artifact for `0.4.0-1`
-  because the Go 1.22 compatibility change modifies upstream `go.mod`/`go.sum`
-  relative to the existing `v0.4.0` orig tarball. Resolve this by either
-  releasing a new upstream tag that includes the compatibility change or by
-  carrying the change as a Debian quilt patch.
+- `dpkg-buildpackage -S` is not yet a clean upload artifact until the `v0.4.1`
+  orig tarball exists and is used for the source package.
 
 ## Acceptance blockers to close before upload
 
-- Commit and review the packaging branch in the upstream repo.
-- Release a new upstream tag that contains the Go 1.22 compatibility change,
-  or convert that change into a Debian quilt patch.
+- Release a new upstream tag that contains the Go 1.22 compatibility change.
 - File an ITP bug and add its real `Closes: #nnnnnn` entry to
   `debian/changelog`.
 - Decide whether to maintain under the Debian Go Packaging Team on Salsa.
