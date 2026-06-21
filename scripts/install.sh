@@ -1,76 +1,107 @@
 #!/bin/bash
-set -e
+set -euo pipefail
+
+REPO="lucky-verma/mwb-linux"
+VERSION="${MWB_VERSION:-latest}"
+INSTALL_DIR="/usr/local/bin"
+BINARY_NAME="mwb"
 
 echo "=== MWB Linux Installer ==="
 echo ""
 
-# Check for root
-if [ "$EUID" -ne 0 ]; then
-    echo "Please run with sudo: sudo bash install.sh"
+if [ "${EUID}" -ne 0 ]; then
+    echo "Please run with sudo: curl -fsSL https://raw.githubusercontent.com/${REPO}/main/scripts/install.sh | sudo bash"
     exit 1
 fi
 
-ACTUAL_USER=${SUDO_USER:-$USER}
+ACTUAL_USER="${SUDO_USER:-$USER}"
+USER_HOME="$(getent passwd "${ACTUAL_USER}" | cut -d: -f6)"
+if [ -z "${USER_HOME}" ]; then
+    echo "Could not determine home directory for ${ACTUAL_USER}"
+    exit 1
+fi
 
-# Install system dependencies
+case "$(uname -m)" in
+    x86_64 | amd64)
+        ARCH="amd64"
+        ;;
+    aarch64 | arm64)
+        ARCH="arm64"
+        ;;
+    *)
+        echo "Unsupported architecture: $(uname -m)"
+        exit 1
+        ;;
+esac
+
+if [ "${VERSION}" = "latest" ]; then
+    DOWNLOAD_URL="https://github.com/${REPO}/releases/latest/download/mwb-linux-${ARCH}"
+else
+    DOWNLOAD_URL="https://github.com/${REPO}/releases/download/${VERSION}/mwb-linux-${ARCH}"
+fi
+
 echo "[1/6] Installing dependencies..."
 apt-get update -qq
-apt-get install -y -qq xdotool xinput xclip x11-xserver-utils > /dev/null 2>&1
+apt-get install -y -qq ca-certificates curl xdotool xinput xclip x11-xserver-utils > /dev/null
 echo "  Done."
 
-# Setup uinput
-echo "[2/6] Configuring uinput..."
+echo "[2/6] Configuring input permissions..."
 modprobe uinput
 echo 'uinput' > /etc/modules-load.d/uinput.conf
-echo 'KERNEL=="uinput", GROUP="input", MODE="0660"' > /etc/udev/rules.d/99-uinput.rules
+cat > /etc/udev/rules.d/99-mwb-uinput.rules << 'EOF'
+KERNEL=="uinput", GROUP="input", MODE="0660"
+EOF
+cat > /etc/udev/rules.d/99-mwb-libinput.rules << 'EOF'
+# mwb virtual mouse: tell libinput not to apply pointer acceleration.
+# The device receives absolute coordinates over the network; bursty
+# packet timing produces variable input deltas. libinput's default
+# adaptive accel curve amplifies that variance into visible cursor
+# wobble on Wayland (issue #5). Flat profile = linear 1:1 mapping.
+ACTION=="add|change", SUBSYSTEM=="input", ATTRS{name}=="mwb-mouse", ENV{LIBINPUT_ACCEL_PROFILE}="flat", ENV{LIBINPUT_ACCEL_SPEED}="0"
+EOF
 udevadm control --reload-rules
 udevadm trigger /dev/uinput 2>/dev/null || true
 echo "  Done."
 
-# Add user to input group
-echo "[3/6] Adding $ACTUAL_USER to input group..."
-usermod -aG input "$ACTUAL_USER"
+echo "[3/6] Adding ${ACTUAL_USER} to input group..."
+usermod -aG input "${ACTUAL_USER}"
 echo "  Done."
 
-# Build
-echo "[4/6] Building mwb..."
-if command -v go &> /dev/null; then
-    cd "$(dirname "$0")/.."
-    go build -o mwb ./cmd/mwb/
-    cp mwb /usr/local/bin/mwb
-    chmod +x /usr/local/bin/mwb
-    echo "  Installed to /usr/local/bin/mwb"
-else
-    echo "  Go not found. Please install Go 1.25+ and run 'make build && sudo make install'"
-fi
+echo "[4/6] Installing mwb ${VERSION} (${ARCH})..."
+TMP_FILE="$(mktemp)"
+trap 'rm -f "${TMP_FILE}"' EXIT
+curl -fsSL "${DOWNLOAD_URL}" -o "${TMP_FILE}"
+install -D -m 755 "${TMP_FILE}" "${INSTALL_DIR}/${BINARY_NAME}"
+echo "  Installed to ${INSTALL_DIR}/${BINARY_NAME}"
 
-# Create default config
 echo "[5/6] Creating config template..."
-CONFIG_DIR="/home/$ACTUAL_USER/.config/mwb"
-mkdir -p "$CONFIG_DIR"
-if [ ! -f "$CONFIG_DIR/config.toml" ]; then
-    cat > "$CONFIG_DIR/config.toml" << 'EOF'
+CONFIG_DIR="${USER_HOME}/.config/mwb"
+mkdir -p "${CONFIG_DIR}"
+if [ ! -f "${CONFIG_DIR}/config.toml" ]; then
+    cat > "${CONFIG_DIR}/config.toml" << 'EOF'
 # MWB Linux Configuration
-# Get the security key from PowerToys → Mouse Without Borders on Windows
+# Get the security key from PowerToys -> Mouse Without Borders on Windows.
 
 host = "192.168.1.100"        # Windows machine IP address
 key = "YourSecurityKey"       # Security key from PowerToys MWB
 name = "linux"                # This machine's name (max 15 chars)
 # port = 15100                # Base port (default 15100)
+# accel_multiplier = 2.0      # Linux -> Windows cursor speed
+# inbound_multiplier = 1.0    # Windows -> Linux cursor speed
 EOF
-    chown "$ACTUAL_USER:$ACTUAL_USER" "$CONFIG_DIR/config.toml"
-    echo "  Config template created at $CONFIG_DIR/config.toml"
-    echo "  Edit it with your Windows machine's IP and security key."
+    chown "${ACTUAL_USER}:${ACTUAL_USER}" "${CONFIG_DIR}/config.toml"
+    echo "  Config template created at ${CONFIG_DIR}/config.toml"
 else
-    echo "  Config already exists at $CONFIG_DIR/config.toml"
+    echo "  Config already exists at ${CONFIG_DIR}/config.toml"
 fi
 
-# Install systemd service
-echo "[6/6] Installing systemd service..."
+echo "[6/6] Installing systemd user service..."
+install -d /etc/systemd/user
 cat > /etc/systemd/user/mwb.service << 'EOF'
 [Unit]
 Description=Mouse Without Borders for Linux
-After=graphical-session.target
+After=graphical-session.target network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
@@ -83,7 +114,6 @@ RestartSec=5
 WantedBy=default.target
 EOF
 echo "  Systemd user service installed."
-echo "  Enable with: systemctl --user enable --now mwb"
 
 echo ""
 echo "=== Installation Complete ==="

@@ -70,14 +70,11 @@ curl -fsSL https://raw.githubusercontent.com/lucky-verma/mwb-linux/main/scripts/
 
 ### From .deb Package
 
-Download from [Releases](https://github.com/lucky-verma/mwb-linux/releases):
+Download the versioned `.deb` for your architecture from
+[Releases](https://github.com/lucky-verma/mwb-linux/releases), then install it:
 
 ```bash
-# Download latest release
-wget https://github.com/lucky-verma/mwb-linux/releases/latest/download/mwb-linux_amd64.deb
-
-# Install (automatically sets up udev rules and dependencies)
-sudo dpkg -i mwb-linux_amd64.deb
+sudo dpkg -i mwb-linux_*_amd64.deb
 
 # Add yourself to the input group
 sudo usermod -aG input $USER

@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-06-21
+
 ### Fixed
 - **Woobly cursor on Wayland (#5)**: two-part fix.
   1. Virtual mouse now declares `INPUT_PROP_POINTER` via `UI_SET_PROPBIT`
@@ -181,7 +183,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `scripts/install.sh` one-command installer.
 - GitHub Actions CI/CD: automated test, lint, and `.deb` release pipeline.
 
-[Unreleased]: https://github.com/lucky-verma/mwb-linux/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/lucky-verma/mwb-linux/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/lucky-verma/mwb-linux/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/lucky-verma/mwb-linux/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/lucky-verma/mwb-linux/compare/v0.1.0...v0.3.0
 [0.1.0]: https://github.com/lucky-verma/mwb-linux/releases/tag/v0.1.0
