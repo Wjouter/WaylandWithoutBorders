@@ -5,7 +5,7 @@ for Debian upload and later Ubuntu sync.
 
 ## Current status
 
-- Upstream release target: `v0.4.1`.
+- Upstream release exists: `v0.4.1`.
 - License is MIT.
 - Go module has one binary and two external Go dependencies.
 - The module now builds on Go 1.22 with Debian/Ubuntu-packaged dependency
@@ -14,22 +14,19 @@ for Debian upload and later Ubuntu sync.
   - `golang.org/x/crypto v0.19.0`
 - `debian/` packaging is present but deliberately marked `UNRELEASED`.
 - The package name is `mwb-linux`; binary installed in `$PATH` is `mwb`.
-- Current readiness: binary package builds cleanly enough for local review;
-  source upload is blocked until the Go 1.22 compatibility change is either in
-  a new upstream release or represented as a Debian patch.
+- Current readiness: binary and source packages build from the Debian packaging
+  branch. Source upload remains blocked on external Debian process steps:
+  ITP, final Debian unstable review, and sponsor feedback.
 
 ## Recommended next move
 
 Use an upstream-first path:
 
-1. Cut the `v0.4.1` upstream release after CI passes.
-2. Rebuild Debian packaging from the `v0.4.1` orig tarball.
-3. Run lintian against source, binary, and changes artifacts in Debian unstable.
-4. File the ITP only after the source package is clean.
-
-This keeps the Debian package simple. The alternative is to keep `v0.4.0` as
-the orig tarball and carry the Go 1.22 compatibility change as a Debian quilt
-patch, but that is noisier for a first upload.
+1. Use the `debian/sid` branch for Debian packaging work.
+2. File the ITP bug against `wnpp`.
+3. Add the real ITP close line to `debian/changelog`.
+4. Move `debian/changelog` from `UNRELEASED` to `unstable`.
+5. Upload the source package to mentors.debian.net and file RFS.
 
 ## Packaging choices
 
@@ -44,6 +41,8 @@ patch, but that is noisier for a first upload.
 - Debian source package local artifacts are ignored via `debian/source/options`
   so `dist/`, `graphify-out/`, and local assistant state do not enter source
   diffs.
+- The `debian/sid` branch repacks the `v0.4.1` upstream tarball as `+ds` and
+  excludes the upstream `debian/` directory from the orig source.
 
 ## Verification ledger
 
@@ -59,30 +58,44 @@ patch, but that is noisier for a first upload.
 - Package contents include `/usr/bin/mwb`, user systemd unit, udev rules,
   README/architecture docs, example config, copyright, changelog, and man page.
 - Extracted-package smoke check passed: `mwb -h` prints the expected CLI flags.
-- `uscan --no-download --verbose` successfully detected GitHub tag `v0.4.0`.
-  Re-run against `v0.4.1` after the release is published.
+- `v0.4.1` GitHub release assets were published and verified:
+  - `checksums.txt`
+  - `mwb-linux-amd64`
+  - `mwb-linux-arm64`
+  - `mwb-linux_0.4.1_amd64.deb`
+  - `mwb-linux_0.4.1_arm64.deb`
+- Published asset checksums passed, the amd64 binary printed expected `mwb -h`
+  output, and both release `.deb` files use the public GitHub noreply
+  maintainer address.
+
+2026-06-21 on Debian unstable via container, using clean `debian/sid` clone:
+
+- `uscan --download-current-version --force-download` repacked the `v0.4.1`
+  upstream tarball as `mwb-linux_0.4.1+ds.orig.tar.xz`, deleting upstream
+  `debian/` files from the orig source.
+- `dpkg-buildpackage -S -us -uc` produced
+  `mwb-linux_0.4.1+ds-1_source.changes`.
+- `lintian mwb-linux_0.4.1+ds-1_source.changes` completed with no findings.
+- Debian unstable binary build from the source package completed and ran package
+  tests through `dh_auto_test`.
+- `lintian mwb-linux_0.4.1+ds-1_amd64.changes` completed with one expected
+  warning: `initial-upload-closes-no-bugs`.
 
 Known verification limits:
 
-- Ubuntu Noble lintian warns `unknown-field Static-Built-Using`; current Debian
-  lintian documents this as the expected Go/Rust static provenance field. Treat
-  this as an Ubuntu-lintian-version warning until checked in Debian unstable.
-- Lintian warns `initial-upload-closes-no-bugs` until a real ITP bug exists.
-- `dpkg-buildpackage -S` is not yet a clean upload artifact until the `v0.4.1`
-  orig tarball exists and is used for the source package.
+- Ubuntu Noble lintian warns `unknown-field Static-Built-Using`; Debian
+  unstable lintian accepts the field.
+- Debian unstable lintian warns `initial-upload-closes-no-bugs` until a real
+  ITP bug exists.
 
 ## Acceptance blockers to close before upload
 
-- Release a new upstream tag that contains the Go 1.22 compatibility change.
 - File an ITP bug and add its real `Closes: #nnnnnn` entry to
   `debian/changelog`.
 - Decide whether to maintain under the Debian Go Packaging Team on Salsa.
-- Build in a Debian unstable clean environment with Debian-packaged Go
-  dependencies only; do not rely on network module downloads.
-- Run `lintian` on source, changes, and binary outputs; fix all errors and
-  justify any remaining warnings.
-- Produce a clean source package after choosing the upstream release vs. quilt
-  patch route for the Go 1.22 compatibility change.
+- Repeat the Debian unstable build in the final maintainer environment
+  (`sbuild`, `pbuilder`, or a sponsor-preferred equivalent) before upload.
+- Re-run `lintian` after adding the real ITP bug; fix any new findings.
 - Review trademark-safe wording around Microsoft PowerToys Mouse Without
   Borders compatibility.
 - Verify source provenance for `docs/assets/banner.png` and `docs/assets/logo.png`
