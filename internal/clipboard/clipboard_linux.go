@@ -10,6 +10,7 @@ import (
 	"compress/flate"
 	"context"
 	"encoding/binary"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"log/slog"
@@ -79,12 +80,23 @@ func (m *Manager) HandlePacket(pkt *protocol.Packet) {
 	case protocol.ClipboardDataEnd:
 		m.handleEnd(pkt)
 	case protocol.Clipboard:
-		slog.Debug("clipboard beat received from remote")
+		slog.Debug("clipboard beat received from remote", "src", pkt.Src, "len", len(pkt.Raw), "hex", hex.EncodeToString(pkt.Raw))
+		// MWB is a pull model: the beat just says "my clipboard changed". Ask the
+		// sender for the actual data — required for files (text/image are also
+		// pushed proactively). Skip if we just set the clipboard, to avoid a loop.
+		m.mu.Lock()
+		recentlySet := time.Since(m.justSet) < 3*time.Second
+		m.mu.Unlock()
+		if !recentlySet {
+			go m.sendClipboardAsk(pkt.Src)
+		}
 	case protocol.ClipboardAsk:
-		slog.Debug("clipboard ask received — sending current clipboard")
+		slog.Debug("clipboard ask received — sending current clipboard", "hex", hex.EncodeToString(pkt.Raw))
 		go m.sendClipboard()
+	case protocol.ClipboardPush:
+		slog.Debug("clipboard push received", "len", len(pkt.Raw), "hex", hex.EncodeToString(pkt.Raw))
 	default:
-		slog.Debug("unhandled clipboard packet", "type", pkt.Type)
+		slog.Debug("unhandled clipboard packet", "type", pkt.Type, "len", len(pkt.Raw), "hex", hex.EncodeToString(pkt.Raw))
 	}
 }
 
@@ -150,6 +162,20 @@ func (m *Manager) pollClipboard() {
 			}
 		}
 	}
+}
+
+// sendClipboardAsk requests the remote's current clipboard data (pull model).
+func (m *Manager) sendClipboardAsk(to uint32) {
+	pkt := &protocol.Packet{
+		Type: protocol.ClipboardAsk,
+		Src:  m.conn.MachineID,
+		Des:  to,
+	}
+	if err := m.conn.SendPacket(pkt); err != nil {
+		slog.Error("send clipboard ask failed", "err", err)
+		return
+	}
+	slog.Debug("sent ClipboardAsk", "to", to)
 }
 
 // sendClipboard sends the current clipboard to the remote.

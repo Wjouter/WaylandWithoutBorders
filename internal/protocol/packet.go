@@ -48,6 +48,10 @@ type Packet struct {
 
 	// Extended area (bytes 32-63, only for big packets)
 	machineName [32]byte
+
+	// Raw holds the decrypted wire bytes, populated by RecvPacket for diagnostics
+	// (so unknown/file packets can be dumped in the clear). nil for sent packets.
+	Raw []byte
 }
 
 // SetMachineName sets the machine name (ASCII, max 32 chars, space-padded).
