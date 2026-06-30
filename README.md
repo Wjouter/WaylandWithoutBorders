@@ -156,6 +156,19 @@ sudo mwb -bidi -edge left
 
 In PowerToys MWB, enter the security key and device name to connect.
 
+## Configuration GUI
+
+Prefer a UI to the TOML file? Launch the built-in web GUI:
+
+```bash
+mwb gui
+```
+
+It opens a local page (`http://127.0.0.1:15199`) where you can edit every
+setting, toggle bidirectional mode, and start/stop/enable the systemd user
+service. Saved settings are written to `config.toml`; restart the service from
+the GUI to apply them. The server binds to localhost only.
+
 ## How It Works
 
 MWB Linux implements the full Mouse Without Borders protocol:
@@ -180,9 +193,10 @@ For detailed protocol documentation, see [docs/ARCHITECTURE.md](docs/ARCHITECTUR
 | `key` | (required) | MWB security key (from PowerToys) |
 | `name` | hostname | This machine's display name |
 | `port` | 15100 | Base port (message port = 15101) |
-| `remote_width` | 1920 | Remote screen width in pixels |
-| `remote_height` | 1080 | Remote screen height in pixels |
-| `edge` | left | Screen edge for switching: `left` or `right` |
+| `edge` | left | **X11 only.** Screen edge for switching: `left` or `right` |
+| `edges` | all four | **Wayland only.** Which edges switch to the remote, e.g. `["left","right"]`. Unset = all four; `["none"]` disables edge switching entirely |
+| `switch_modifier` | (none) | **Wayland only.** Require a held key to cross edges (PowerToys "Easy Mouse"): `shift`, `ctrl`, or `alt`. Empty = cross freely |
+| `bidirectional` | false | Enable bidirectional mode from config (same as `-bidi`). Lets the GUI and systemd service turn it on without editing flags |
 | `clipboard` | true | Clipboard sync: set `false` to disable text/image sharing |
 | `accel_multiplier` | 2.0 | Cursor speed when controlling Windows. Lower it (e.g. `1.0`, `0.5`) if the Windows cursor feels too fast |
 | `inbound_multiplier` | 1.0 | Cursor speed when Windows controls Linux. `1.0` mirrors Windows exactly; raise it for faster inbound movement |
@@ -253,7 +267,8 @@ scripts/
 - **Keyboard on Windows lock screen** — Keyboard input may not work on the Windows lock screen (Winlogon desktop security restriction)
 - **Middle mouse button auto-scroll** — Middle-click auto-scroll (scroll lock mode) does not work in browsers; normal middle-click works
 - **First connection** — Initial handshake takes ~3-16s depending on Windows MWB state; subsequent reconnects are instant
-- **Bidirectional mode requires X11** — Edge detection and device isolation use `xdotool`/`xinput`. Receive-only mode works on Wayland (XWayland session). Native Wayland bidirectional support requires compositor extensions and is not yet implemented.
+- **Bidirectional mode on X11** — The default build uses `xdotool`/`xinput` for edge detection and device isolation, so bidirectional mode needs an X11 (or XWayland) session. Receive-only mode works everywhere.
+- **Bidirectional mode on Wayland (opt-in build)** — A native Wayland driver uses the `org.freedesktop.portal.InputCapture` portal + libei (compositor-native edge barriers and input suppression, no `xdotool`/`xinput`, no root). It is opt-in at build time because it needs cgo + libei: `make build-wayland` (Arch: `libei`; Debian: `libei-dev`). The binary auto-selects the portal driver on Wayland and the X11 path otherwise. Requires a compositor with the InputCapture portal (GNOME 46+, KDE Plasma 6+). On Wayland the cursor can switch from **any** edge (the `edge` setting is X11-only), and no remote-resolution config is needed — coordinates are normalized like MWB itself.
 - **Keyboard layout metadata** — PowerToys MWB keyboard packets carry Windows virtual-key codes and flags, but not hardware scan codes or Unicode text. MWB Linux uses `keyboard_layout` profiles for common layouts; unsupported profiles fall back to the original US-compatible mapping. Fully zero-config global layout support requires sender-side scan code or Unicode metadata.
 - **Brief screen stall on return with many input devices** — Device isolation re-enables every matched device via `xinput` when control returns to Linux. On setups with many input devices (e.g. several gaming peripherals exposing 15+ `xinput` sub-devices) the compositor can stall for ~1-2s on return (the cursor keeps moving, the screen briefly freezes). An EVIOCGRAB-based isolation was tried to avoid this but introduced a worse cursor regression and was reverted; a proper fix (EVIOCGRAB done right, or libei) is tracked for a future release.
 - **Cursor speed / drift** — Remote cursor movement scales raw evdev deltas by `accel_multiplier` (default 2×); lower it if the Windows cursor feels too fast (the Windows side adds no acceleration of its own). Tracking is open-loop, so the virtual cursor may still drift from the actual position over long sessions.
@@ -265,10 +280,11 @@ Contributions are welcome! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for gui
 ### Building
 
 ```bash
-make build    # Build binary
-make test     # Run tests
-make lint     # Run linter
-make check    # All of the above
+make build          # Build binary (X11 bidirectional)
+make build-wayland  # Build with Wayland bidirectional (cgo + libei required)
+make test           # Run tests
+make lint           # Run linter
+make check          # All of the above
 ```
 
 ## Acknowledgments
