@@ -84,49 +84,39 @@ func TestParseXinputIDs_NoRazerWooting(t *testing.T) {
 	}
 }
 
-// --- applyAcceleration ---
+// --- normalized motion model ---
 
-func TestApplyAcceleration_ZeroDelta(t *testing.T) {
-	if got := applyAcceleration(0, defaultAccelMultiplier); got != 0 {
-		t.Errorf("applyAcceleration(0) = %d, want 0", got)
+func TestEnterRemoteEdge_Positions(t *testing.T) {
+	cases := []struct {
+		edge         string
+		wantX, wantY int32
+	}{
+		{"left", normMax - switchMargin, normMax / 2},
+		{"right", switchMargin, normMax / 2},
+		{"top", normMax / 2, normMax - switchMargin},
+		{"bottom", normMax / 2, switchMargin},
 	}
-}
-
-func TestApplyAcceleration_SmallPositive(t *testing.T) {
-	// Values < 1 after scaling should be clamped to 1
-	if got := applyAcceleration(1, defaultAccelMultiplier); got < 1 {
-		t.Errorf("applyAcceleration(1) = %d, should be >= 1", got)
-	}
-}
-
-func TestApplyAcceleration_SmallNegative(t *testing.T) {
-	if got := applyAcceleration(-1, defaultAccelMultiplier); got > -1 {
-		t.Errorf("applyAcceleration(-1) = %d, should be <= -1", got)
-	}
-}
-
-func TestApplyAcceleration_Symmetry(t *testing.T) {
-	for _, delta := range []int32{1, 5, 10, 100} {
-		pos := applyAcceleration(delta, defaultAccelMultiplier)
-		neg := applyAcceleration(-delta, defaultAccelMultiplier)
-		if pos != -neg {
-			t.Errorf("acceleration not symmetric: applyAcceleration(%d)=%d, applyAcceleration(%d)=%d",
-				delta, pos, -delta, neg)
+	for _, tc := range cases {
+		c := &Capturer{}
+		c.EnterRemoteEdge(tc.edge, 0.5)
+		if c.remoteX != tc.wantX || c.remoteY != tc.wantY {
+			t.Errorf("edge %s: got (%d,%d), want (%d,%d)", tc.edge, c.remoteX, c.remoteY, tc.wantX, tc.wantY)
+		}
+		if c.active {
+			t.Errorf("edge %s: active should be false after crossing to remote", tc.edge)
 		}
 	}
 }
 
-func TestApplyAcceleration_Multiplier(t *testing.T) {
-	// Multiplier scales linearly above the sub-pixel clamp.
-	if got := applyAcceleration(10, 1.0); got != 10 {
-		t.Errorf("applyAcceleration(10, 1.0) = %d, want 10", got)
+func TestAddMotion_SubPixelAccumulation(t *testing.T) {
+	c := &Capturer{}
+	c.addMotionLocked(0.5, 0) // truncates to 0, carries 0.5
+	if c.remoteX != 0 {
+		t.Errorf("after first 0.5: remoteX=%d, want 0 (sub-pixel held, not rounded up)", c.remoteX)
 	}
-	if got := applyAcceleration(10, 3.0); got != 30 {
-		t.Errorf("applyAcceleration(10, 3.0) = %d, want 30", got)
-	}
-	// A fractional multiplier still moves at least 1px for a unit delta.
-	if got := applyAcceleration(1, 0.5); got != 1 {
-		t.Errorf("applyAcceleration(1, 0.5) = %d, want 1 (sub-pixel clamp)", got)
+	c.addMotionLocked(0.5, 0) // 0.5 + 0.5 = 1.0 → advances exactly 1
+	if c.remoteX != 1 {
+		t.Errorf("after second 0.5: remoteX=%d, want 1 (carry applied)", c.remoteX)
 	}
 }
 
@@ -166,8 +156,6 @@ func TestSetActive_NoDeadlockOnActivate(t *testing.T) {
 	c := &Capturer{
 		active:   false,
 		stopCh:   make(chan struct{}),
-		remoteW:  1920,
-		remoteH:  1080,
 		edgeSide: "left",
 	}
 	c.screen = ScreenInfo{Width: 1920, Height: 1080}
@@ -192,8 +180,6 @@ func TestSetActive_ResetsGatesOnActivate(t *testing.T) {
 		canSwitch: true,
 		canReturn: true,
 		stopCh:    make(chan struct{}),
-		remoteW:   1920,
-		remoteH:   1080,
 	}
 	c.SetActive(true)
 
@@ -214,10 +200,8 @@ func TestSetActive_ResetsGatesOnActivate(t *testing.T) {
 
 func TestSetActive_NoOpWhenAlreadyActive(t *testing.T) {
 	c := &Capturer{
-		active:  true,
-		stopCh:  make(chan struct{}),
-		remoteW: 1920,
-		remoteH: 1080,
+		active: true,
+		stopCh: make(chan struct{}),
 	}
 	// Should not deadlock, should not panic
 	done := make(chan struct{})

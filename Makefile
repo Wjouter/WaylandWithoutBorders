@@ -5,6 +5,11 @@ SYSTEMD_USER_DIR := $(HOME)/.config/systemd/user
 build:
 	go build -o mwb ./cmd/mwb
 
+# Wayland bidirectional support is opt-in: it needs cgo + libei
+# (Arch: libei, Debian: libei-dev). Builds the same binary plus the portal driver.
+build-wayland:
+	CGO_ENABLED=1 go build -tags wayland -o mwb ./cmd/mwb
+
 install: build
 	install -D mwb $(HOME)/go/bin/mwb
 	install -d $(SYSTEMD_USER_DIR)
