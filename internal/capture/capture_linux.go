@@ -190,6 +190,22 @@ func (c *Capturer) EdgeReentry(edge string, perpFrac float64) (x, y int32) {
 	}
 }
 
+// NotifyRemoteSwitch tells the remote host it now owns the cursor (the MWB
+// MachineSwitched handoff). Besides the formal switch, this is what makes the
+// remote pull our clipboard when we've just copied a file/large data (it checks
+// for a recent clipboard beat on MachineSwitched). Call it right after we cross
+// to the remote.
+func (c *Capturer) NotifyRemoteSwitch() {
+	pkt := &protocol.Packet{
+		Type: protocol.MachineSwitched,
+		Src:  c.conn.MachineID,
+		Des:  c.conn.RemoteID,
+	}
+	if err := c.conn.SendPacket(pkt); err != nil {
+		slog.Debug("send MachineSwitched failed", "err", err)
+	}
+}
+
 // FeedEvent injects a normalized input event into the shared forwarding path.
 // Used by the Wayland portal driver; the X11 path calls handleEvent directly
 // from its evdev readers. Both funnel into the same handleRel/handleKey logic.
@@ -389,6 +405,9 @@ func (c *Capturer) pollCursorEdge() {
 
 				// Disable local input in X11 (synchronous — only takes ~2ms)
 				c.disableXinput()
+
+				// Formal handoff — also triggers the remote to pull our clipboard.
+				c.NotifyRemoteSwitch()
 
 				// Send mouse burst to the entry position on remote
 				// Multiple packets help Windows MWB register the switch reliably

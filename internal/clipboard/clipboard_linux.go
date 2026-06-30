@@ -104,8 +104,21 @@ func (m *Manager) HandlePacket(pkt *protocol.Packet) {
 			go m.pullRemoteFile()
 		}
 	case protocol.ClipboardAsk:
-		slog.Debug("clipboard ask received — sending current clipboard", "hex", hex.EncodeToString(pkt.Raw))
-		go m.sendClipboard()
+		// The remote wants our clipboard. For a file, push it to the asker's
+		// file-transfer port (MWB's owner-pushes-on-ask model). Otherwise fall
+		// back to the in-band text path.
+		slog.Debug("clipboard ask received", "src", pkt.Src, "des", pkt.Des)
+		if pkt.Des != m.conn.MachineID {
+			break // ask addressed to a different machine
+		}
+		m.mu.Lock()
+		path := m.localFile
+		m.mu.Unlock()
+		if path != "" && m.key != "" && m.host != "" {
+			go m.pushFile(m.host, path)
+		} else {
+			go m.sendClipboard()
+		}
 	case protocol.ClipboardPush:
 		slog.Debug("clipboard push received", "len", len(pkt.Raw), "hex", hex.EncodeToString(pkt.Raw))
 	default:

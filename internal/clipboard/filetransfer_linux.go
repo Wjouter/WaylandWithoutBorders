@@ -184,43 +184,92 @@ func (m *Manager) serveFileConn(conn net.Conn) {
 	defer conn.Close()
 	_ = conn.SetDeadline(time.Now().Add(clipXferQuiet))
 
-	// We send (push=true matches MWB's server side); the puller drives the flow.
+	// A peer pulled from us (PowerToys' server side sends push=true).
 	enc, _, err := clipHandshake(conn, m.key, m.conn.MachineID, m.conn.LocalName, true)
 	if err != nil {
 		slog.Debug("clipboard serve handshake failed", "err", err)
 		return
 	}
-
 	m.mu.Lock()
 	path := m.localFile
 	m.mu.Unlock()
-	if path == "" {
-		slog.Debug("clipboard serve: no local file to send")
+	if err := sendFileStream(enc, path); err != nil {
+		slog.Debug("clipboard serve failed", "err", err)
+	}
+}
+
+// pushFile connects to the asker's clipboard port and pushes the local file.
+// This is MWB's response to a ClipboardAsk: the data owner pushes to the asker.
+func (m *Manager) pushFile(host, path string) {
+	addr := net.JoinHostPort(host, strconv.Itoa(m.basePort))
+	conn, err := net.DialTimeout("tcp", addr, clipDialQuiet)
+	if err != nil {
+		slog.Debug("clipboard push dial failed", "addr", addr, "err", err)
 		return
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(clipXferQuiet))
+	enc, _, err := clipHandshake(conn, m.key, m.conn.MachineID, m.conn.LocalName, true)
+	if err != nil {
+		slog.Debug("clipboard push handshake failed", "err", err)
+		return
+	}
+	if err := sendFileStream(enc, path); err != nil {
+		slog.Debug("clipboard push failed", "err", err)
+	}
+}
+
+// sendFileStream writes the 1024-byte "<size>*<path>" header followed by the
+// raw file bytes over the (encrypted) stream.
+func sendFileStream(enc io.Writer, path string) error {
+	if path == "" {
+		return fmt.Errorf("no local file to send")
 	}
 	fi, err := os.Stat(path)
 	if err != nil || fi.IsDir() {
-		slog.Debug("clipboard serve: file unavailable", "path", path, "err", err)
-		return
+		return fmt.Errorf("file unavailable: %v", err)
 	}
-
 	header := make([]byte, clipHeaderSize)
 	copy(header, encodeUTF16LE(fmt.Sprintf("%d*%s", fi.Size(), path)))
 	if _, err := enc.Write(header); err != nil {
-		slog.Debug("clipboard serve: write header failed", "err", err)
-		return
+		return fmt.Errorf("write header: %w", err)
 	}
 	f, err := os.Open(path)
 	if err != nil {
-		return
+		return err
 	}
 	defer f.Close()
-	n, err := io.Copy(enc, f)
-	if err != nil {
-		slog.Debug("clipboard serve: send body failed", "sent", n, "err", err)
-		return
+
+	// The AES-CBC stream requires 16-byte-aligned writes. File sizes rarely align,
+	// so zero-pad the final block; the receiver reads exactly dataSize bytes from
+	// the header and ignores the padding.
+	const bufSize = 64 * 1024 // multiple of 16
+	buf := make([]byte, bufSize)
+	remaining := fi.Size()
+	for remaining > 0 {
+		toRead := int64(bufSize)
+		if toRead > remaining {
+			toRead = remaining
+		}
+		n, err := io.ReadFull(f, buf[:toRead])
+		if err != nil && err != io.ErrUnexpectedEOF {
+			return fmt.Errorf("read file: %w", err)
+		}
+		remaining -= int64(n)
+		w := n
+		if remaining == 0 && w%16 != 0 { // final block — pad up to 16
+			pad := 16 - w%16
+			for i := 0; i < pad; i++ {
+				buf[w+i] = 0
+			}
+			w += pad
+		}
+		if _, err := enc.Write(buf[:w]); err != nil {
+			return fmt.Errorf("send body: %w", err)
+		}
 	}
-	slog.Info("served file to remote", "path", path, "size", n)
+	slog.Info("sent file to remote", "path", path, "size", fi.Size())
+	return nil
 }
 
 // onWayland reports whether to use wl-clipboard instead of xclip.

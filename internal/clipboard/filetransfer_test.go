@@ -3,10 +3,45 @@
 package clipboard
 
 import (
+	"bytes"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
 )
+
+// sendFileStream must 16-byte-align the body (AES-CBC requirement) by zero-
+// padding the final block, while the header reports the true size.
+func TestSendFileStreamPadsToBlock(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "f.bin")
+	const size = 5014 // not a multiple of 16
+	content := bytes.Repeat([]byte{0xAB}, size)
+	if err := os.WriteFile(path, content, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var buf bytes.Buffer
+	if err := sendFileStream(&buf, path); err != nil {
+		t.Fatal(err)
+	}
+
+	body := buf.Bytes()[clipHeaderSize:] // skip the 1024-byte header
+	if len(body)%16 != 0 {
+		t.Errorf("body length %d not 16-aligned", len(body))
+	}
+	if len(body) != size+(16-size%16) {
+		t.Errorf("body length %d, want %d", len(body), size+(16-size%16))
+	}
+	if !bytes.Equal(body[:size], content) {
+		t.Error("first dataSize bytes do not match the file content")
+	}
+	header := decodeUTF16LE(buf.Bytes()[:clipHeaderSize])
+	if !strings.HasPrefix(header, strconv.Itoa(size)+"*") {
+		t.Errorf("header %q does not report true size", header)
+	}
+}
 
 func TestWinBase(t *testing.T) {
 	cases := map[string]string{

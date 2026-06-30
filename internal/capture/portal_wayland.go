@@ -535,6 +535,7 @@ func (p *portal) onActivated(body []interface{}) {
 
 	if p.wantMod == 0 {
 		p.cap.EnterRemoteEdge(edge, perpFrac)
+		p.cap.NotifyRemoteSwitch() // formal handoff + triggers remote clipboard pull
 		slog.Info("portal Activated — control crossed to remote", "edge", edge, "perpFrac", perpFrac)
 		return
 	}
@@ -556,6 +557,7 @@ func (p *portal) gatedEnter(edge string, perpFrac float64) {
 	mods := p.curMods.Load()
 	if mods&p.wantMod != 0 {
 		p.cap.EnterRemoteEdge(edge, perpFrac)
+		p.cap.NotifyRemoteSwitch()
 		slog.Info("modifier held — control crossed to remote", "edge", edge, "mods", mods)
 		return
 	}
