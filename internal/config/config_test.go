@@ -182,3 +182,19 @@ func TestLoadConfigValidation(t *testing.T) {
 		t.Error("should fail without key")
 	}
 }
+
+func TestSaveRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sub", "config.toml") // sub/ exercises MkdirAll
+	in := &Config{Host: "10.0.0.2", Key: "k", Name: "box", Edge: "right", Bidirectional: true}
+	if err := Save(path, in); err != nil {
+		t.Fatal(err)
+	}
+	out, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Host != "10.0.0.2" || out.Edge != "right" || !out.Bidirectional {
+		t.Errorf("round-trip mismatch: %+v", out)
+	}
+}

@@ -9,7 +9,7 @@ Type=simple
 # Override here only if auto-detection fails for your setup.
 # Environment=DISPLAY=:1
 # Environment=XAUTHORITY=/run/user/1000/gdg/Xauthority
-ExecStart=/usr/local/bin/mwb -bidi -edge left
+ExecStart=/usr/local/bin/mwb
 Restart=on-failure
 RestartSec=5
 

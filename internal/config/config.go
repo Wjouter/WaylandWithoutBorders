@@ -4,19 +4,32 @@ package config
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/BurntSushi/toml"
 )
 
 type Config struct {
-	Host         string `toml:"host"`
-	Key          string `toml:"key"`
-	Name         string `toml:"name"`
-	Port         int    `toml:"port"`
-	RemoteWidth  int    `toml:"remote_width"`
-	RemoteHeight int    `toml:"remote_height"`
-	Edge         string `toml:"edge"`
-	Clipboard    *bool  `toml:"clipboard"` // nil = unset, treated as enabled
+	Host      string `toml:"host"`
+	Key       string `toml:"key"`
+	Name      string `toml:"name"`
+	Port      int    `toml:"port"`
+	Edge      string `toml:"edge"`      // X11 single switch edge: left or right
+	Clipboard *bool  `toml:"clipboard"` // nil = unset, treated as enabled
+
+	// Edges selects which screen edges switch to the remote (Wayland only).
+	// Unset = all four. ["left","right"] = only those. ["none"] = disable
+	// edge switching entirely.
+	Edges []string `toml:"edges"`
+
+	// SwitchModifier gates edge switching on a held modifier (Wayland only),
+	// like PowerToys' Easy Mouse. "" = switch freely; "shift"/"ctrl"/"alt" =
+	// only cross while that key is held.
+	SwitchModifier string `toml:"switch_modifier"`
+
+	// Bidirectional enables this machine to also control the remote host.
+	// Equivalent to the -bidi flag; the flag OR-s with this so either turns it on.
+	Bidirectional bool `toml:"bidirectional"`
 
 	// KeyboardLayout controls inbound Windows->Linux keyboard mapping. "auto"
 	// detects the local Linux layout when possible; unsupported layouts fall back
@@ -58,12 +71,6 @@ func Load(path string) (*Config, error) {
 	if len(cfg.Name) > 15 {
 		cfg.Name = cfg.Name[:15]
 	}
-	if cfg.RemoteWidth == 0 {
-		cfg.RemoteWidth = 1920
-	}
-	if cfg.RemoteHeight == 0 {
-		cfg.RemoteHeight = 1080
-	}
 	if cfg.AccelMultiplier <= 0 {
 		cfg.AccelMultiplier = 2.0
 	}
@@ -77,6 +84,42 @@ func Load(path string) (*Config, error) {
 		cfg.Edge = "left"
 	}
 	return &cfg, nil
+}
+
+// Save writes the config back to path as TOML, creating parent dirs as needed.
+// Used by the GUI to persist edited settings.
+func Save(path string, cfg *Config) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("create config dir: %w", err)
+	}
+	f, err := os.Create(path)
+	if err != nil {
+		return fmt.Errorf("create config: %w", err)
+	}
+	defer f.Close()
+	if err := toml.NewEncoder(f).Encode(cfg); err != nil {
+		return fmt.Errorf("encode config: %w", err)
+	}
+	return nil
+}
+
+// EnabledEdges resolves which edges switch to the remote (Wayland). Unset
+// defaults to all four; an explicit "none"/"off" disables switching entirely;
+// otherwise the listed valid edges are used.
+func (c *Config) EnabledEdges() []string {
+	if len(c.Edges) == 0 {
+		return []string{"left", "right", "top", "bottom"}
+	}
+	var out []string
+	for _, e := range c.Edges {
+		switch e {
+		case "left", "right", "top", "bottom":
+			out = append(out, e)
+		case "none", "off":
+			return nil
+		}
+	}
+	return out
 }
 
 func (c *Config) MessagePort() int {
