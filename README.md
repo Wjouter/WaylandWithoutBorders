@@ -92,84 +92,79 @@ Everything below is added on top of [lucky-verma/mwb-linux](https://github.com/l
 
 ## Installation
 
-> **Building from source is recommended for this fork.** The prebuilt `.deb`,
-> one-line, and binary methods below pull from the **upstream**
-> [lucky-verma/mwb-linux](https://github.com/lucky-verma/mwb-linux) releases,
-> which are **X11-only and do not include this fork's features** (Wayland, GUI,
-> file transfer, etc.). Publish your own releases or use [From Source](#from-source).
-> For Wayland support, build with `make build-wayland`.
+Install **from source** — this fork isn't published as a prebuilt package. The
+whole thing is a single Go binary; the steps below are complete for a fresh
+machine.
 
-### One-Line Install (Ubuntu/Debian, upstream X11-only)
+> Replace `<your-username>` with your GitHub user (or use
+> `lucky-verma/mwb-linux` for the upstream X11-only version).
+
+### 1. Install dependencies
+
+**Wayland (KDE Plasma 6+ / GNOME 46+) — recommended:**
+
+| Distro | Command |
+|--------|---------|
+| Arch / CachyOS | `sudo pacman -S go libei wl-clipboard` |
+| Debian / Ubuntu | `sudo apt install golang libei-dev wl-clipboard` |
+| Fedora | `sudo dnf install golang libei-devel wl-clipboard` |
+
+**X11:**
+
+| Distro | Command |
+|--------|---------|
+| Arch / CachyOS | `sudo pacman -S go xdotool xorg-xinput xclip` |
+| Debian / Ubuntu | `sudo apt install golang xdotool xinput xclip x11-xserver-utils` |
+| Fedora | `sudo dnf install golang xdotool xinput xclip` |
+
+You need **Go 1.25+**. On Wayland, `libei`/`libei-dev` is a *build* dependency
+(cgo); `wl-clipboard` is a *runtime* dependency for file/clipboard sharing.
+
+### 2. Set up uinput permissions
+
+Input **injection** always goes through `/dev/uinput`, and on **X11** input
+**capture** reads `/dev/input/event*`. Both need the `input` group (this avoids
+running as root):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/lucky-verma/mwb-linux/main/scripts/install.sh | sudo bash
-```
-
-### From .deb Package
-
-Download the versioned `.deb` for your architecture from
-[Releases](https://github.com/lucky-verma/mwb-linux/releases), then install it:
-
-```bash
-sudo dpkg -i mwb-linux_*_amd64.deb
-
-# Add yourself to the input group
-sudo usermod -aG input $USER
-```
-
-### From Binary
-
-```bash
-# Download binary
-wget https://github.com/lucky-verma/mwb-linux/releases/latest/download/mwb-linux-amd64
-chmod +x mwb-linux-amd64
-sudo mv mwb-linux-amd64 /usr/local/bin/mwb
-
-# Install dependencies
-sudo apt install xdotool xinput xclip
-
-# Setup permissions
-sudo bash -c 'modprobe uinput && echo uinput > /etc/modules-load.d/uinput.conf'
+sudo modprobe uinput
+echo uinput | sudo tee /etc/modules-load.d/uinput.conf
 echo 'KERNEL=="uinput", GROUP="input", MODE="0660"' | sudo tee /etc/udev/rules.d/99-mwb-uinput.rules
-sudo udevadm control --reload-rules
-sudo usermod -aG input $USER
+sudo udevadm control --reload-rules && sudo udevadm trigger /dev/uinput
+sudo usermod -aG input "$USER"
 ```
 
-### From Source
+> **Log out and back in** afterwards so the group change takes effect.
+> On Wayland the InputCapture portal handles capture, so no root or
+> `/dev/input` access is needed for the capture direction — only `uinput` for
+> injection.
+
+### 3. Build and install
 
 ```bash
-git clone https://github.com/<your-username>/mwb-linux.git   # this fork
+git clone https://github.com/<your-username>/mwb-linux.git
 cd mwb-linux
 
-# X11 build:
-make build
-# Wayland build (needs cgo + libei — Arch: libei, Debian: libei-dev):
-make build-wayland
+# Wayland (cgo + libei):
+make install-wayland
 
-make install        # no sudo — installs a per-user service
-systemctl --user enable --now mwb
+# …or X11:
+make install
 ```
 
-> **Wayland users:** build with `make build-wayland` and install the resulting
-> `mwb` binary (e.g. `install -D mwb ~/go/bin/mwb`). You also need
-> `wl-clipboard` for file copy/paste. The InputCapture portal requires
-> KDE Plasma 6+ or GNOME 46+.
+This installs a **per-user** systemd service: the binary goes to `~/go/bin/mwb`
+and the unit to `~/.config/systemd/user/`. Don't run `make install` with `sudo`
+— that installs under `root` and the `--user` service can't find the binary.
 
-`make install` is a per-user install: the binary goes to `~/go/bin/mwb` and the
-service to `~/.config/systemd/user/`. Do **not** run it with `sudo` — that
-installs under `root` and the `--user` service then can't find the binary.
+Now jump to [Quick Start](#quick-start) to configure the security key, then:
 
-It does not set up system dependencies. If this is a fresh machine, run the
-dependency and permission steps from [From Binary](#from-binary) first
-(`xdotool`/`xinput`/`xclip`, the `uinput` module, the udev rule, and the
-`input` group).
+```bash
+systemctl --user enable --now mwb
+journalctl --user -u mwb -f          # follow logs
+```
 
-> **Note:** Log out and back in after installation for group changes to take effect.
->
-> **One installer at a time.** The one-line/`.deb`/binary methods install a
-> system service that runs `/usr/local/bin/mwb`. `make install` installs a
-> per-user service that runs `~/go/bin/mwb`. If you switch methods, stop and
-> disable the old service first so you aren't running a stale binary.
+To uninstall: `make uninstall`. To run in the foreground for testing instead of
+as a service: `mwb -bidi -debug`.
 
 ## Quick Start
 
@@ -196,8 +191,12 @@ EOF
 mwb
 
 # Bidirectional (Linux also controls Windows)
-sudo mwb -bidi -edge left
+mwb -bidi            # Wayland: no root needed (the portal handles capture)
+sudo mwb -bidi       # X11: needs root/input-group to read /dev/input
 ```
+
+You can also set `bidirectional = true` in `config.toml` (or toggle it in the
+GUI) so the systemd service starts in bidirectional mode without any flags.
 
 ### 4. Add your Linux machine on Windows
 
@@ -283,7 +282,7 @@ For detailed protocol documentation, see [docs/ARCHITECTURE.md](docs/ARCHITECTUR
 Run the setup permissions commands above, then log out and back in.
 
 ### Clipboard not syncing
-Ensure `xclip` is installed: `sudo apt install xclip`
+Ensure the clipboard tool is installed: `wl-clipboard` on Wayland, `xclip` on X11.
 
 ### Disable clipboard sharing
 Set `clipboard = false` in `config.toml`, or run with `-no-clipboard`. The Linux
@@ -291,7 +290,8 @@ client then never reads or writes the local clipboard, so it won't override what
 you copied on Windows.
 
 ### Mouse controls both screens simultaneously
-Run with `-bidi` flag and `sudo` for device isolation via xinput.
+On Wayland the portal suppresses local input automatically. On X11 you need
+`-bidi` with `sudo` (or the `input` group) so device isolation via `xinput` can run.
 
 ### Connection refused
 - Check Windows firewall allows port 15100-15101
@@ -304,18 +304,21 @@ Set "Move mouse relatively" to OFF in PowerToys MWB settings.
 ## Project Structure
 
 ```
-cmd/mwb/              CLI entry point
+cmd/mwb/
+  main.go             CLI entry point + driver selection
+  gui.go, web/        Local web configuration GUI (mwb gui)
 internal/
-  capture/            Edge detection, evdev capture, xinput device isolation
-  clipboard/          Bidirectional clipboard sync (text + images)
+  capture/            Edge detection + input forwarding
+    capture_linux.go    X11 path (xdotool/xinput/evdev)
+    portal_wayland.go   Wayland InputCapture portal driver (build tag: wayland)
+    ei_cgo.go           libei receiver (cgo, build tag: wayland)
+  clipboard/          Clipboard sync (text/image in-band) + file transfer (:15100)
   config/             TOML configuration
   input/              Virtual mouse/keyboard via uinput
   network/            TCP connection, encryption, packet send/receive
   protocol/           MWB packet types, serialization, AES-256-CBC
 docs/
   ARCHITECTURE.md     Detailed protocol and architecture documentation
-scripts/
-  install.sh          Installation helper script
 ```
 
 ## Known Limitations

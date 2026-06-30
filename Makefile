@@ -1,4 +1,4 @@
-.PHONY: build install uninstall clean test fmt lint check bump
+.PHONY: build build-wayland install install-wayland install-only uninstall clean test fmt lint check bump
 
 SYSTEMD_USER_DIR := $(HOME)/.config/systemd/user
 
@@ -10,7 +10,12 @@ build:
 build-wayland:
 	CGO_ENABLED=1 go build -tags wayland -o mwb ./cmd/mwb
 
-install: build
+# install     — X11 build, then install the per-user service
+# install-wayland — Wayland build, then install (does NOT rebuild as X11)
+install: build install-only
+install-wayland: build-wayland install-only
+
+install-only:
 	install -D mwb $(HOME)/go/bin/mwb
 	install -d $(SYSTEMD_USER_DIR)
 	install -m 644 mwb.service $(SYSTEMD_USER_DIR)/mwb.service
