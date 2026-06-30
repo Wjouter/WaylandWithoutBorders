@@ -169,6 +169,15 @@ setting, toggle bidirectional mode, and start/stop/enable the systemd user
 service. Saved settings are written to `config.toml`; restart the service from
 the GUI to apply them. The server binds to localhost only.
 
+## File copy/paste
+
+Copying a **file** on one machine and pasting it on the other works in both
+directions (text and images too). Files transfer over MWB's separate clipboard
+channel (the base port, `15100`); received files are saved to
+`~/Downloads/MouseWithoutBorders/` and placed on the local clipboard so you can
+paste them in your file manager. Requires `wl-clipboard` on Wayland (`wl-copy`/
+`wl-paste`) or `xclip` on X11. Single files only (zip a folder first); 100 MB cap.
+
 ## How It Works
 
 MWB Linux implements the full Mouse Without Borders protocol:

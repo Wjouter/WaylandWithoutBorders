@@ -150,7 +150,7 @@ func main() {
 			// Start clipboard sharing on the auto-detected display unless disabled.
 			var clipMgr *clipboard.Manager
 			if clipboardEnabled {
-				clipMgr = clipboard.NewManager(conn, capture.DetectDisplay())
+				clipMgr = clipboard.NewManager(conn, capture.DetectDisplay(), cfg.Key, cfg.Host, cfg.Port)
 				handler.Clipboard = clipMgr
 				clipMgr.Start()
 			}

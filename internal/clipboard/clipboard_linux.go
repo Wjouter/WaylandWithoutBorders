@@ -16,6 +16,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -37,7 +38,11 @@ const (
 type Manager struct {
 	conn        *network.Conn
 	display     string
+	key         string // security key — for the separate file-transfer channel
+	host        string // remote host — to pull files from
+	basePort    int    // file-transfer port (MessagePort-1)
 	lastHash    string // hash of last clipboard content we sent
+	localFile   string // local file currently on the clipboard, offered to peers
 	mu          sync.Mutex
 	recvBuf     bytes.Buffer // accumulates incoming clipboard chunks
 	receiving   bool
@@ -47,12 +52,16 @@ type Manager struct {
 	wg          sync.WaitGroup // tracks pollClipboard goroutine for clean shutdown
 }
 
-// NewManager creates a clipboard manager.
-func NewManager(conn *network.Conn, display string) *Manager {
+// NewManager creates a clipboard manager. key/host/basePort enable file transfer
+// over the separate MWB clipboard channel; pass an empty key to disable it.
+func NewManager(conn *network.Conn, display, key, host string, basePort int) *Manager {
 	return &Manager{
-		conn:    conn,
-		display: display,
-		stopCh:  make(chan struct{}),
+		conn:     conn,
+		display:  display,
+		key:      key,
+		host:     host,
+		basePort: basePort,
+		stopCh:   make(chan struct{}),
 	}
 }
 
@@ -63,6 +72,9 @@ func (m *Manager) Start() {
 		defer m.wg.Done()
 		m.pollClipboard()
 	}()
+	if m.key != "" {
+		go m.serveFiles() // serve files to peers that pull from us
+	}
 	slog.Info("clipboard sharing enabled")
 }
 
@@ -80,15 +92,16 @@ func (m *Manager) HandlePacket(pkt *protocol.Packet) {
 	case protocol.ClipboardDataEnd:
 		m.handleEnd(pkt)
 	case protocol.Clipboard:
-		slog.Debug("clipboard beat received from remote", "src", pkt.Src, "len", len(pkt.Raw), "hex", hex.EncodeToString(pkt.Raw))
-		// MWB is a pull model: the beat just says "my clipboard changed". Ask the
-		// sender for the actual data — required for files (text/image are also
-		// pushed proactively). Skip if we just set the clipboard, to avoid a loop.
+		slog.Debug("clipboard beat received from remote", "src", pkt.Src, "len", len(pkt.Raw))
+		// MWB is a pull model: the beat says "my clipboard changed". Pull it over
+		// the file-transfer channel — files are saved + put on our clipboard;
+		// text/image come in-band so the pull skips them. Skip if we just set the
+		// clipboard ourselves, to avoid a loop.
 		m.mu.Lock()
 		recentlySet := time.Since(m.justSet) < 3*time.Second
 		m.mu.Unlock()
-		if !recentlySet {
-			go m.sendClipboardAsk(pkt.Src)
+		if !recentlySet && m.key != "" {
+			go m.pullRemoteFile()
 		}
 	case protocol.ClipboardAsk:
 		slog.Debug("clipboard ask received — sending current clipboard", "hex", hex.EncodeToString(pkt.Raw))
@@ -116,6 +129,26 @@ func (m *Manager) pollClipboard() {
 			m.mu.Unlock()
 			if recentlySet {
 				continue
+			}
+
+			// Check for a file on the clipboard first — beat so peers can pull it
+			// over the file-transfer channel (file bytes don't go in-band).
+			if m.key != "" {
+				if path := m.getLocalClipboardFile(); path != "" {
+					hash := "file:" + path
+					m.mu.Lock()
+					changed := hash != m.lastHash
+					if changed {
+						m.lastHash = hash
+						m.localFile = path
+					}
+					m.mu.Unlock()
+					if changed {
+						slog.Info("file on clipboard, notifying remote", "path", path)
+						m.sendBeat()
+					}
+					continue
+				}
 			}
 
 			// Check for image clipboard first
@@ -164,18 +197,42 @@ func (m *Manager) pollClipboard() {
 	}
 }
 
-// sendClipboardAsk requests the remote's current clipboard data (pull model).
-func (m *Manager) sendClipboardAsk(to uint32) {
-	pkt := &protocol.Packet{
-		Type: protocol.ClipboardAsk,
-		Src:  m.conn.MachineID,
-		Des:  to,
-	}
-	if err := m.conn.SendPacket(pkt); err != nil {
-		slog.Error("send clipboard ask failed", "err", err)
+// pullRemoteFile pulls the remote clipboard over the file-transfer channel and,
+// if it's a file, saves it and puts it on the local clipboard.
+func (m *Manager) pullRemoteFile() {
+	if m.host == "" {
 		return
 	}
-	slog.Debug("sent ClipboardAsk", "to", to)
+	path, err := pullFile(m.host, m.basePort, m.key, m.conn.MachineID, m.conn.LocalName, fileSaveDir())
+	if err != nil {
+		slog.Debug("clipboard file pull failed", "err", err)
+		return
+	}
+	if path == "" {
+		return // text/image — handled in-band
+	}
+	m.mu.Lock()
+	m.justSet = time.Now()
+	m.localFile = path
+	m.lastHash = "file:" + path // don't re-beat the file we just received
+	m.mu.Unlock()
+	m.setLocalFileClipboard(path)
+}
+
+// sendBeat notifies peers that our clipboard changed (pull model). Peers then
+// pull the data from our file-transfer server.
+func (m *Manager) sendBeat() {
+	pkt := &protocol.Packet{Type: protocol.Clipboard, Src: m.conn.MachineID, Des: protocol.IDAll}
+	pkt.SetMachineName(m.conn.LocalName)
+	if err := m.conn.SendPacket(pkt); err != nil {
+		slog.Debug("send clipboard beat failed", "err", err)
+	}
+}
+
+// fileSaveDir is where pulled files are written.
+func fileSaveDir() string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, "Downloads", "MouseWithoutBorders")
 }
 
 // sendClipboard sends the current clipboard to the remote.

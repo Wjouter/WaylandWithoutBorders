@@ -326,9 +326,13 @@ all writes.
 
 ## Future Work
 
-- [ ] File drag-and-drop
+- [x] Wayland native bidirectional input (InputCapture portal + libei; `-tags wayland`)
+- [x] File copy/paste over the separate clipboard channel (base port 15100):
+      AES + IV handshake, 64-byte DATA header, then a 1024-byte UTF-16LE
+      `"<size>*<name>"` header followed by the raw file bytes.
+- [ ] File drag-and-drop (the interactive drag path, distinct from copy/paste)
 - [ ] Multi-monitor support
-- [ ] Wayland native support (replace xdotool/xinput with compositor protocol)
+- [ ] Native multi-machine layout grid (PowerToys-style)
 - [ ] Replace xdotool polling with XInput2 RawMotion events (100 forks/sec → 0)
 - [ ] Replace xinput name-matching with EVIOCGRAB (vendor-agnostic isolation)
 - [ ] Virtual cursor drift correction (wire UpdateRemoteScreen to incoming abs coords)
