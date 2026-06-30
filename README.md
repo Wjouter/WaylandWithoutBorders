@@ -8,6 +8,7 @@
 
 <p align="center">
   <a href="#features">Features</a> &bull;
+  <a href="#whats-new-in-this-fork">What's New</a> &bull;
   <a href="#installation">Installation</a> &bull;
   <a href="#quick-start">Quick Start</a> &bull;
   <a href="#how-it-works">How It Works</a> &bull;
@@ -24,45 +25,81 @@
 
 ---
 
+> ### 🍴 This is a fork of [lucky-verma/mwb-linux](https://github.com/lucky-verma/mwb-linux)
+>
+> It adds **native Wayland bidirectional support**, a **configuration GUI**, **file copy/paste**, **switch-from-any-edge** with a modifier "easy mouse" mode, smoother input, and more. See [What's new in this fork](#whats-new-in-this-fork) for the full list. All credit for the original Linux client and the MWB protocol implementation goes to the upstream project.
+
 ## What is this?
 
-MWB Linux is a native Linux client that connects to **Microsoft PowerToys Mouse Without Borders** on Windows. Move your mouse to the edge of the screen, and it seamlessly jumps to the other machine — along with your keyboard and clipboard.
+MWB Linux is a native Linux client that connects to **Microsoft PowerToys Mouse Without Borders** on Windows. Move your mouse to the edge of the screen and it seamlessly jumps to the other machine — along with your keyboard and clipboard. **Bidirectional control now works natively on Wayland** (KDE Plasma 6 / GNOME 46+), not just X11.
 
 ```mermaid
 flowchart LR
-    A["🐧 <b>Linux PC</b><br/>Mouse · Keyboard"] <-->|" 🖱️ Mouse · ⌨️ Keyboard · 📋 Clipboard "| B["🪟 <b>Windows PC</b><br/>Mouse · Keyboard"]
+    A["🐧 <b>Linux PC</b><br/>Mouse · Keyboard · Files"] <-->|" 🖱️ Mouse · ⌨️ Keyboard · 📋 Clipboard · 📁 Files "| B["🪟 <b>Windows PC</b><br/>Mouse · Keyboard · Files"]
 ```
-
-> Move your mouse to the screen edge — the cursor seamlessly jumps to the other machine.
 
 No extra software needed on Windows beyond PowerToys, which bundles Mouse Without Borders.
 
 ## Features
 
 - **Bidirectional mouse sharing** — Control both machines from either keyboard/mouse
-- **Seamless edge switching** — Move cursor to screen edge, it appears on the other machine
-- **Clipboard sync** — Copy text or images on one machine, paste on the other
+- **Native Wayland support** — Bidirectional input via the InputCapture portal + libei (no `xdotool`/`xinput`, no root); X11 still supported
+- **Switch from any edge** — Cross left/right/top/bottom; choose which edges, or require a held modifier (Shift/Ctrl/Alt) — PowerToys-style "Easy Mouse"
+- **Configuration GUI** — `mwb gui` opens a local web UI to edit settings and control the service
+- **Clipboard & file sync** — Copy text, images, **or files** on one machine and paste on the other
 - **Keyboard forwarding** — Type on your Linux keyboard, text appears on Windows
-- **Full mouse support** — Scroll wheel, horizontal scroll, and side buttons (back/forward)
+- **Full mouse support** — Scroll wheel, touchpad two-finger scroll, horizontal scroll, middle click, and side buttons (back/forward)
 - **Encrypted** — AES-256-CBC encryption with PBKDF2 key derivation
-- **Device isolation** — When controlling Windows, your Linux cursor doesn't move
-- **Dual-mode connection** — Acts as both server and client for fast reconnection
-- **Zero config on Windows** — Works with existing PowerToys MWB setup
-- **Lightweight** — Single binary, ~5MB, no GUI dependencies
+- **Remembered permission** — The Wayland capture prompt only appears once (persists across reboots)
+- **Lightweight** — Single Go binary, minimal dependencies
+
+## What's new in this fork
+
+Everything below is added on top of [lucky-verma/mwb-linux](https://github.com/lucky-verma/mwb-linux):
+
+**Wayland**
+- Native **bidirectional** input on Wayland via the `org.freedesktop.portal.InputCapture` portal + libei — the upstream project is X11-only for the capture direction. Compositor-native edge barriers and input suppression replace `xdotool`/`xinput`, and no root is needed.
+- The capture **permission dialog is remembered** (`persist_mode` + `restore_token`), so it only prompts once.
+- The binary **auto-selects** the Wayland driver on a Wayland session and the X11 path otherwise.
+
+**Switching**
+- **Any-edge switching** (left/right/top/bottom) instead of a single configured edge.
+- **Selectable edges** (`edges`) and a full **disable** option.
+- **Modifier-gated switching** (`switch_modifier`) — only cross while holding Shift/Ctrl/Alt, like PowerToys' Easy Mouse.
+
+**Clipboard / files**
+- **File copy/paste** in both directions over MWB's separate file-transfer channel (received files land in `~/Downloads/MouseWithoutBorders/` and on your clipboard).
+
+**Input quality**
+- Fixed **scroll direction**, added **touchpad two-finger scroll** and **horizontal scroll**.
+- Added **middle-click** and **side-button** (back/forward) forwarding.
+- Smoother cursor motion (single combined packet + sub-pixel accumulation).
+- **Resolution-free** coordinate mapping — no need to configure the remote screen size.
+
+**Configuration**
+- A built-in **web GUI** (`mwb gui`) to edit all settings, toggle bidirectional/edges/modifier, and start/stop/enable the systemd service.
+- `bidirectional` config flag so the daemon can be fully config-driven (no CLI flags needed).
 
 ## Demo
 
 | Direction | What happens |
 |-----------|-------------|
-| Mouse hits left edge on Linux | Cursor appears on Windows, Linux input disabled |
-| Mouse hits right edge on Windows | Cursor returns to Linux, input restored |
-| Ctrl+C on Windows | Text/image available on Linux clipboard |
-| Ctrl+C on Linux | Text/image available on Windows clipboard |
+| Mouse hits an enabled edge on Linux | Cursor crosses to Windows |
+| Mouse hits the return edge on Windows | Cursor returns to Linux |
+| Ctrl+C on Windows | Text / image / **file** available on Linux |
+| Ctrl+C on Linux | Text / image / **file** available on Windows |
 | Type on Linux keyboard | Text appears in focused Windows app |
 
 ## Installation
 
-### One-Line Install (Ubuntu/Debian)
+> **Building from source is recommended for this fork.** The prebuilt `.deb`,
+> one-line, and binary methods below pull from the **upstream**
+> [lucky-verma/mwb-linux](https://github.com/lucky-verma/mwb-linux) releases,
+> which are **X11-only and do not include this fork's features** (Wayland, GUI,
+> file transfer, etc.). Publish your own releases or use [From Source](#from-source).
+> For Wayland support, build with `make build-wayland`.
+
+### One-Line Install (Ubuntu/Debian, upstream X11-only)
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/lucky-verma/mwb-linux/main/scripts/install.sh | sudo bash
@@ -101,12 +138,22 @@ sudo usermod -aG input $USER
 ### From Source
 
 ```bash
-git clone https://github.com/lucky-verma/mwb-linux.git
+git clone https://github.com/<your-username>/mwb-linux.git   # this fork
 cd mwb-linux
+
+# X11 build:
 make build
+# Wayland build (needs cgo + libei — Arch: libei, Debian: libei-dev):
+make build-wayland
+
 make install        # no sudo — installs a per-user service
 systemctl --user enable --now mwb
 ```
+
+> **Wayland users:** build with `make build-wayland` and install the resulting
+> `mwb` binary (e.g. `install -D mwb ~/go/bin/mwb`). You also need
+> `wl-clipboard` for file copy/paste. The InputCapture portal requires
+> KDE Plasma 6+ or GNOME 46+.
 
 `make install` is a per-user install: the binary goes to `~/go/bin/mwb` and the
 service to `~/.config/systemd/user/`. Do **not** run it with `sudo` — that
@@ -298,9 +345,9 @@ make check          # All of the above
 
 ## Acknowledgments
 
-- [Microsoft PowerToys](https://github.com/microsoft/PowerToys) — Mouse Without Borders is part of PowerToys (MIT License). This project implements the MWB network protocol for Linux.
-- [bketelsen/mwb](https://github.com/bketelsen/mwb) — Initial Go implementation of the MWB receive-only client that this project builds upon.
-- The MWB protocol specification was derived from the open-source PowerToys codebase.
+- [lucky-verma/mwb-linux](https://github.com/lucky-verma/mwb-linux) — **The project this is forked from.** All of the original Linux client, the MWB protocol implementation, and the X11 bidirectional support come from there.
+- [Microsoft PowerToys](https://github.com/microsoft/PowerToys) — Mouse Without Borders is part of PowerToys (MIT License). This project implements the MWB network protocol for Linux; the file-transfer and clipboard wire formats were derived from the open-source PowerToys codebase.
+- [bketelsen/mwb](https://github.com/bketelsen/mwb) — Initial Go implementation of the MWB receive-only client that upstream builds upon.
 
 ## License
 
