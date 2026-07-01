@@ -434,21 +434,26 @@ func (m *Manager) handleImageClipboard(data []byte) {
 		return
 	}
 
-	// Set image clipboard via xclip
+	// Set image clipboard: wl-copy on Wayland, xclip on X11.
+	var setCmd []string
+	if onWayland() {
+		setCmd = []string{"wl-copy", "--type", mimeType}
+	} else {
+		setCmd = []string{"xclip", "-selection", "clipboard", "-t", mimeType, "-i", tmpFile}
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), execTimeout)
-	cmd := exec.CommandContext(ctx, "xclip", "-selection", "clipboard", "-t", mimeType, "-i", tmpFile)
-	cmd.Env = append(os.Environ(), "DISPLAY="+m.display)
+	cmd := exec.CommandContext(ctx, setCmd[0], setCmd[1:]...)
+	if onWayland() {
+		f, _ := os.Open(tmpFile)
+		defer f.Close() //nolint:errcheck
+		cmd.Stdin = f
+	} else {
+		cmd.Env = append(os.Environ(), "DISPLAY="+m.display)
+	}
 	err := cmd.Run()
 	cancel()
 	if err != nil {
-		slog.Error("set image clipboard via xclip failed", "err", err, "mime", mimeType)
-		ctx2, cancel2 := context.WithTimeout(context.Background(), execTimeout)
-		cmd2 := exec.CommandContext(ctx2, "xclip", "-selection", "clipboard", "-t", "image/png", "-i", tmpFile)
-		cmd2.Env = append(os.Environ(), "DISPLAY="+m.display)
-		if err2 := cmd2.Run(); err2 != nil {
-			slog.Error("set image clipboard fallback also failed", "err", err2)
-		}
-		cancel2()
+		slog.Error("set image clipboard failed", "err", err, "mime", mimeType, "wayland", onWayland())
 		return
 	}
 
@@ -462,18 +467,18 @@ func (m *Manager) handleImageClipboard(data []byte) {
 }
 
 // getLocalClipboard reads the current clipboard text.
+// On Wayland, xclip reads a stale XWayland clipboard, so use wl-paste there.
 // Times out after execTimeout to prevent blocking the poll goroutine indefinitely.
 func (m *Manager) getLocalClipboard() string {
-	for _, args := range [][]string{
+	cmds := [][]string{
 		{"xclip", "-selection", "clipboard", "-o"},
 		{"xsel", "--clipboard", "--output"},
-	} {
-		ctx, cancel := context.WithTimeout(context.Background(), execTimeout)
-		cmd := exec.CommandContext(ctx, args[0], args[1:]...)
-		cmd.Env = append(os.Environ(), "DISPLAY="+m.display)
-		out, err := cmd.Output()
-		cancel()
-		if err == nil {
+	}
+	if onWayland() {
+		cmds = [][]string{{"wl-paste", "--no-newline"}}
+	}
+	for _, args := range cmds {
+		if out, err := m.runClip(args); err == nil {
 			return string(out)
 		}
 	}
@@ -483,13 +488,19 @@ func (m *Manager) getLocalClipboard() string {
 // setLocalClipboard sets the clipboard text.
 // Times out after execTimeout to prevent blocking on a hung xclip/xsel.
 func (m *Manager) setLocalClipboard(text string) {
-	for _, args := range [][]string{
+	cmds := [][]string{
 		{"xclip", "-selection", "clipboard"},
 		{"xsel", "--clipboard", "--input"},
-	} {
+	}
+	if onWayland() {
+		cmds = [][]string{{"wl-copy"}}
+	}
+	for _, args := range cmds {
 		ctx, cancel := context.WithTimeout(context.Background(), execTimeout)
 		cmd := exec.CommandContext(ctx, args[0], args[1:]...)
-		cmd.Env = append(os.Environ(), "DISPLAY="+m.display)
+		if !onWayland() {
+			cmd.Env = append(os.Environ(), "DISPLAY="+m.display)
+		}
 		cmd.Stdin = strings.NewReader(text)
 		err := cmd.Run()
 		cancel()
@@ -497,25 +508,22 @@ func (m *Manager) setLocalClipboard(text string) {
 			return
 		}
 	}
-	slog.Error("set clipboard failed — both xclip and xsel failed")
+	slog.Error("set clipboard failed", "wayland", onWayland())
 }
 
 // getLocalImageClipboard checks if clipboard contains an image and returns it.
 func (m *Manager) getLocalImageClipboard() []byte {
-	ctx, cancel := context.WithTimeout(context.Background(), execTimeout)
-	cmd := exec.CommandContext(ctx, "xclip", "-selection", "clipboard", "-t", "TARGETS", "-o")
-	cmd.Env = append(os.Environ(), "DISPLAY="+m.display)
-	out, err := cmd.Output()
-	cancel()
+	listCmd := []string{"xclip", "-selection", "clipboard", "-t", "TARGETS", "-o"}
+	getCmd := []string{"xclip", "-selection", "clipboard", "-t", "image/png", "-o"}
+	if onWayland() {
+		listCmd = []string{"wl-paste", "--list-types"}
+		getCmd = []string{"wl-paste", "--type", "image/png"}
+	}
+	out, err := m.runClip(listCmd)
 	if err != nil || !strings.Contains(string(out), "image/png") {
 		return nil
 	}
-
-	ctx2, cancel2 := context.WithTimeout(context.Background(), execTimeout)
-	cmd2 := exec.CommandContext(ctx2, "xclip", "-selection", "clipboard", "-t", "image/png", "-o")
-	cmd2.Env = append(os.Environ(), "DISPLAY="+m.display)
-	imgData, err := cmd2.Output()
-	cancel2()
+	imgData, err := m.runClip(getCmd)
 	if err != nil || len(imgData) == 0 {
 		return nil
 	}
