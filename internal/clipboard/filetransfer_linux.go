@@ -106,7 +106,7 @@ func pullFile(host string, basePort int, key string, machineID uint32, name, sav
 	if err != nil {
 		return "", fmt.Errorf("dial %s: %w", addr, err)
 	}
-	defer conn.Close()
+	defer conn.Close() //nolint:errcheck
 	_ = conn.SetDeadline(time.Now().Add(clipXferQuiet))
 
 	_, dec, err := clipHandshake(conn, key, machineID, name, false)
@@ -144,7 +144,7 @@ func pullFile(host string, basePort int, key string, machineID uint32, name, sav
 	if err != nil {
 		return "", err
 	}
-	defer f.Close()
+	defer f.Close() //nolint:errcheck
 	if _, err := io.CopyN(f, dec, size); err != nil {
 		return "", fmt.Errorf("receive file body: %w", err)
 	}
@@ -181,7 +181,7 @@ func (m *Manager) serveFiles() {
 }
 
 func (m *Manager) serveFileConn(conn net.Conn) {
-	defer conn.Close()
+	defer conn.Close() //nolint:errcheck
 	_ = conn.SetDeadline(time.Now().Add(clipXferQuiet))
 
 	// A peer pulled from us (PowerToys' server side sends push=true).
@@ -207,7 +207,7 @@ func (m *Manager) pushFile(host, path string) {
 		slog.Debug("clipboard push dial failed", "addr", addr, "err", err)
 		return
 	}
-	defer conn.Close()
+	defer conn.Close() //nolint:errcheck
 	_ = conn.SetDeadline(time.Now().Add(clipXferQuiet))
 	enc, _, err := clipHandshake(conn, m.key, m.conn.MachineID, m.conn.LocalName, true)
 	if err != nil {
@@ -238,7 +238,7 @@ func sendFileStream(enc io.Writer, path string) error {
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	defer f.Close() //nolint:errcheck
 
 	// The AES-CBC stream requires 16-byte-aligned writes. File sizes rarely align,
 	// so zero-pad the final block; the receiver reads exactly dataSize bytes from
@@ -344,10 +344,6 @@ func (m *Manager) runClip(args []string) ([]byte, error) {
 // uriToPath converts a file:// URI to a local path (decoding %20 etc.).
 func uriToPath(uri string) string {
 	p := strings.TrimPrefix(uri, "file://")
-	// file:///path has an empty host; drop the leading authority slash if doubled.
-	if strings.HasPrefix(p, "/") {
-		// ok
-	}
 	p = strings.ReplaceAll(p, "%20", " ")
 	return p
 }

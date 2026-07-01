@@ -38,6 +38,10 @@ const (
 	capPointer  = 2
 
 	portalRequestTimeout = 60 * time.Second // first call may show a permission dialog
+
+	// touchpadPxPerNotch converts smooth touchpad scroll pixels into wheel
+	// notches (one WHEEL_DELTA per this many pixels of accumulated scroll).
+	touchpadPxPerNotch = 30.0
 )
 
 // barrierPos is the (iiii) position struct the portal expects per barrier.

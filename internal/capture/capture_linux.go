@@ -32,10 +32,6 @@ const (
 	relHWheel = 0x06
 	relWheel  = 0x08
 
-	// touchpadPxPerNotch converts smooth touchpad scroll pixels into wheel
-	// notches (one WHEEL_DELTA per this many pixels of accumulated scroll).
-	touchpadPxPerNotch = 30.0
-
 	inputEventSize = 24
 
 	// The MWB wire protocol carries absolute cursor coordinates on a normalized

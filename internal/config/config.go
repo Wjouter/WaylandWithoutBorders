@@ -96,9 +96,12 @@ func Save(path string, cfg *Config) error {
 	if err != nil {
 		return fmt.Errorf("create config: %w", err)
 	}
-	defer f.Close()
 	if err := toml.NewEncoder(f).Encode(cfg); err != nil {
+		f.Close() //nolint:errcheck
 		return fmt.Errorf("encode config: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("close config: %w", err)
 	}
 	return nil
 }
