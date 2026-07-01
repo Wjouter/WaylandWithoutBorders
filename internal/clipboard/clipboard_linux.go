@@ -38,11 +38,12 @@ const (
 type Manager struct {
 	conn        *network.Conn
 	display     string
-	key         string // security key — for the separate file-transfer channel
-	host        string // remote host — to pull files from
-	basePort    int    // file-transfer port (MessagePort-1)
-	lastHash    string // hash of last clipboard content we sent
-	localFile   string // local file currently on the clipboard, offered to peers
+	key         string     // security key — for the separate file-transfer channel
+	host        string     // remote host — to pull files from
+	basePort    int        // file-transfer port (MessagePort-1)
+	lastHash    string     // hash of last clipboard content we sent
+	localFile   string     // local file currently on the clipboard, offered to peers
+	sendMu      sync.Mutex // serializes sendText/sendImage so their packet sequences never interleave on the wire
 	mu          sync.Mutex
 	recvBuf     bytes.Buffer // accumulates incoming clipboard chunks
 	receiving   bool
@@ -256,8 +257,12 @@ func (m *Manager) sendClipboard() {
 	}
 }
 
-// sendText sends text to the remote via ClipboardText packets.
+// sendText sends text to the remote via ClipboardText packets. Serialized
+// against sendImage: an overlapping concurrent send would interleave the two
+// packet sequences on the wire, corrupting both on the receiving end.
 func (m *Manager) sendText(text string) {
+	m.sendMu.Lock()
+	defer m.sendMu.Unlock()
 	// Prepend format marker: "TXT" + text
 	// MWB uses multi-format with GUID separator, but for simplicity we just send TXT
 	markedText := "TXT" + text
@@ -531,7 +536,10 @@ func (m *Manager) getLocalImageClipboard() []byte {
 }
 
 // sendImage sends image data to the remote via ClipboardImage packets.
+// Serialized against sendText — see its comment for why.
 func (m *Manager) sendImage(data []byte) {
+	m.sendMu.Lock()
+	defer m.sendMu.Unlock()
 	if len(data) > maxInlineSize {
 		slog.Warn("image too large for inline send", "size", len(data))
 		return
