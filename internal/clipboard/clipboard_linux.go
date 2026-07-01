@@ -194,19 +194,31 @@ func (m *Manager) pollClipboard() {
 			hash := fmt.Sprintf("%d:%s", len(text), text[:min(100, len(text))])
 			m.mu.Lock()
 			changed := hash != m.lastHash
-			if changed {
-				m.lastHash = hash
+			m.mu.Unlock()
+			if !changed {
+				continue
 			}
+
+			// A rapidly-rewritten source (e.g. dragging a text selection in a
+			// terminal, which can push the clipboard several times as the
+			// selection grows) can be read mid-update. Confirm it's stable
+			// before trusting and sending it; otherwise wait for a later tick
+			// once it settles, rather than shipping a torn read.
+			time.Sleep(150 * time.Millisecond)
+			if m.getLocalClipboard() != text {
+				continue
+			}
+
+			m.mu.Lock()
+			m.lastHash = hash
 			m.mu.Unlock()
 
-			if changed {
-				slog.Info("clipboard changed, sending to remote", "len", len(text))
-				m.wg.Add(1)
-				go func(t string) {
-					defer m.wg.Done()
-					m.sendText(t)
-				}(text)
-			}
+			slog.Info("clipboard changed, sending to remote", "len", len(text))
+			m.wg.Add(1)
+			go func(t string) {
+				defer m.wg.Done()
+				m.sendText(t)
+			}(text)
 		}
 	}
 }
