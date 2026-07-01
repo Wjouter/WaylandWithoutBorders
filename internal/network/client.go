@@ -307,10 +307,18 @@ func (c *Conn) RecvPacket() (*protocol.Packet, error) {
 		full := make([]byte, protocol.PacketSizeEx)
 		copy(full, buf)
 		copy(full[protocol.PacketSize:], ext)
-		return protocol.UnmarshalPacket(full)
+		pkt, err := protocol.UnmarshalPacket(full)
+		if err == nil {
+			pkt.Raw = full
+		}
+		return pkt, err
 	}
 
-	return protocol.UnmarshalPacket(buf)
+	pkt, err := protocol.UnmarshalPacket(buf)
+	if err == nil {
+		pkt.Raw = buf
+	}
+	return pkt, err
 }
 
 // Close sends a ByeBye packet (like OG MWB) then closes the connection.

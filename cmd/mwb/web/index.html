@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mouse Without Borders — Linux</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font-family: system-ui, sans-serif; max-width: 640px; margin: 2rem auto; padding: 0 1rem; line-height: 1.5; }
+  h1 { font-size: 1.4rem; }
+  fieldset { border: 1px solid #8884; border-radius: 8px; margin: 1rem 0; padding: 1rem; }
+  legend { font-weight: 600; padding: 0 .4rem; }
+  label { display: block; margin: .6rem 0 .15rem; font-size: .9rem; }
+  input[type=text], input[type=number], select { width: 100%; padding: .4rem; box-sizing: border-box; border-radius: 6px; border: 1px solid #8886; background: transparent; color: inherit; }
+  .row { display: flex; gap: 1rem; }
+  .row > div { flex: 1; }
+  .check { display: flex; align-items: center; gap: .5rem; margin: .8rem 0; }
+  .check input { width: auto; }
+  button { padding: .5rem 1rem; border-radius: 6px; border: 1px solid #8886; cursor: pointer; background: #4477dd; color: #fff; font-size: .9rem; }
+  button.secondary { background: transparent; color: inherit; }
+  .bar { display: flex; gap: .5rem; flex-wrap: wrap; align-items: center; }
+  #status { font-size: .85rem; }
+  .dot { display: inline-block; width: .7rem; height: .7rem; border-radius: 50%; background: #999; margin-right: .3rem; vertical-align: middle; }
+  .dot.active { background: #2ecc71; }
+  pre { background: #8881; padding: .6rem; border-radius: 6px; overflow: auto; max-height: 200px; font-size: .8rem; }
+  #msg { font-size: .85rem; min-height: 1.2em; }
+  .ok { color: #2ecc71; } .err { color: #e74c3c; }
+</style>
+</head>
+<body>
+<h1>Mouse Without Borders <small>— Linux</small></h1>
+
+<form id="cfg">
+  <fieldset>
+    <legend>Connection</legend>
+    <label>Windows host IP</label>
+    <input type="text" name="Host" placeholder="192.168.1.100" required>
+    <label>Security key (from PowerToys)</label>
+    <input type="text" name="Key" placeholder="paste the MWB key" required>
+    <div class="row">
+      <div><label>This machine name (≤15)</label><input type="text" name="Name" maxlength="15" placeholder="linux"></div>
+      <div><label>Base port</label><input type="number" name="Port" placeholder="15100"></div>
+    </div>
+  </fieldset>
+
+  <fieldset>
+    <legend>Screen &amp; cursor</legend>
+    <label>Switch edges <small>(Wayland — uncheck all to disable switching)</small></label>
+    <div class="bar" id="edges">
+      <label class="check"><input type="checkbox" value="left" checked> left</label>
+      <label class="check"><input type="checkbox" value="right" checked> right</label>
+      <label class="check"><input type="checkbox" value="top" checked> top</label>
+      <label class="check"><input type="checkbox" value="bottom" checked> bottom</label>
+    </div>
+    <label>Switch modifier <small>(Wayland — only cross while this key is held)</small></label>
+    <select name="SwitchModifier">
+      <option value="">none (switch freely)</option>
+      <option value="shift">Shift</option>
+      <option value="ctrl">Ctrl</option>
+      <option value="alt">Alt</option>
+    </select>
+    <label>Switch edge <small>(X11 only)</small></label>
+    <select name="Edge"><option value="left">left</option><option value="right">right</option></select>
+    <div class="row">
+      <div><label>Outbound speed (accel_multiplier)</label><input type="number" step="0.1" name="AccelMultiplier" placeholder="2.0"></div>
+      <div><label>Inbound speed (inbound_multiplier)</label><input type="number" step="0.1" name="InboundMultiplier" placeholder="1.0"></div>
+    </div>
+  </fieldset>
+
+  <fieldset>
+    <legend>Behavior</legend>
+    <div class="check"><input type="checkbox" id="Bidirectional" name="Bidirectional"><label for="Bidirectional" style="margin:0">Bidirectional (this machine also controls Windows)</label></div>
+    <div class="check"><input type="checkbox" id="Clipboard" name="Clipboard"><label for="Clipboard" style="margin:0">Share clipboard</label></div>
+    <label>Keyboard layout</label>
+    <select name="KeyboardLayout">
+      <option>auto</option><option>us</option><option>de</option><option>fr</option><option>be</option>
+      <option>es</option><option>it</option><option>gb</option><option>pt</option><option>nordic</option>
+      <option>ch</option><option>nl</option>
+    </select>
+  </fieldset>
+
+  <div class="bar">
+    <button type="submit">Save</button>
+    <span id="msg"></span>
+  </div>
+</form>
+
+<fieldset>
+  <legend>Service</legend>
+  <div id="status"><span class="dot"></span><span id="state">…</span></div>
+  <div class="bar" style="margin:.6rem 0">
+    <button type="button" onclick="svc('start')">Start</button>
+    <button type="button" class="secondary" onclick="svc('stop')">Stop</button>
+    <button type="button" class="secondary" onclick="svc('restart')">Restart</button>
+    <button type="button" class="secondary" onclick="svc('enable')">Enable at login</button>
+    <button type="button" class="secondary" onclick="svc('disable')">Disable</button>
+  </div>
+  <pre id="log">loading…</pre>
+</fieldset>
+
+<script>
+const form = document.getElementById('cfg');
+const msg = document.getElementById('msg');
+
+function setMsg(t, ok) { msg.textContent = t; msg.className = ok ? 'ok' : 'err'; }
+
+const edgeBoxes = () => Array.from(document.querySelectorAll('#edges input'));
+
+async function loadConfig() {
+  const c = await (await fetch('/api/config')).json();
+  for (const [k, v] of Object.entries(c)) {
+    const el = form.elements[k];
+    if (!el) continue;
+    if (el.type === 'checkbox') el.checked = (k === 'Clipboard') ? (v !== false) : !!v; // Clipboard defaults on (null = enabled)
+    else if (v !== null && v !== 0 && v !== '') el.value = v;
+  }
+  // Edges: null/empty = all on; ["none"] or [] = all off; otherwise the listed set.
+  const edges = c.Edges;
+  const all = !edges || edges.length === 0;
+  const disabled = edges && (edges.includes('none') || edges.includes('off'));
+  edgeBoxes().forEach(b => b.checked = all ? true : (disabled ? false : edges.includes(b.value)));
+}
+
+form.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const c = {};
+  for (const el of form.elements) {
+    if (!el.name) continue;
+    if (el.type === 'checkbox') c[el.name] = el.checked;
+    else if (el.type === 'number') c[el.name] = el.value === '' ? 0 : parseFloat(el.value);
+    else c[el.name] = el.value;
+  }
+  // Edges: checked set, or ["none"] when all unchecked (disable switching).
+  const checked = edgeBoxes().filter(b => b.checked).map(b => b.value);
+  c.Edges = checked.length ? checked : ['none'];
+  const r = await fetch('/api/config', { method: 'POST', body: JSON.stringify(c) });
+  if (r.ok) setMsg('Saved. Restart the service to apply.', true);
+  else setMsg('Save failed: ' + (await r.text()), false);
+});
+
+async function svc(action) {
+  const r = await fetch('/api/service', { method: 'POST', body: JSON.stringify({ action }) });
+  setMsg(r.ok ? (action + ' ok') : (action + ' failed: ' + await r.text()), r.ok);
+  refresh();
+}
+
+async function refresh() {
+  const s = await (await fetch('/api/status')).json();
+  document.querySelector('.dot').classList.toggle('active', s.active);
+  document.getElementById('state').textContent = 'service: ' + s.state;
+  document.getElementById('log').textContent = s.log || '(no recent log)';
+}
+
+loadConfig();
+refresh();
+setInterval(refresh, 5000);
+</script>
+</body>
+</html>

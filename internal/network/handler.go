@@ -2,6 +2,7 @@
 package network
 
 import (
+	"encoding/hex"
 	"log/slog"
 	"time"
 
@@ -79,11 +80,23 @@ func (h *Handler) HandlePacket(pkt *protocol.Packet) {
 		if h.Clipboard != nil {
 			h.Clipboard.HandlePacket(pkt)
 		}
+	case protocol.ClipboardDragDrop, protocol.ClipboardDragDropEnd, protocol.ExplorerDragDrop,
+		protocol.ClipboardCapture, protocol.ClipboardDragDropOp:
+		// File-transfer / drag-drop family — not implemented. Trace the decrypted
+		// bytes so the wire format can be reverse-engineered from real traffic.
+		tracePacket("file/drag packet", pkt)
 	case protocol.Hello, protocol.Awake, protocol.HandshakeAck:
 		// expected control packets — ignore silently
 	default:
-		slog.Debug("unhandled packet type", "type", pkt.Type)
+		tracePacket("unhandled packet", pkt)
 	}
+}
+
+// tracePacket logs a packet's type and decrypted bytes (hex) at debug level —
+// used to reverse-engineer unimplemented packet types like file transfer.
+func tracePacket(msg string, pkt *protocol.Packet) {
+	slog.Debug(msg, "type", pkt.Type, "src", pkt.Src, "des", pkt.Des,
+		"len", len(pkt.Raw), "hex", hex.EncodeToString(pkt.Raw))
 }
 
 func (h *Handler) handleMouse(pkt *protocol.Packet) {

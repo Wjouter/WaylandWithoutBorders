@@ -10,11 +10,13 @@ import (
 	"compress/flate"
 	"context"
 	"encoding/binary"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"log/slog"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -36,7 +38,11 @@ const (
 type Manager struct {
 	conn        *network.Conn
 	display     string
+	key         string // security key — for the separate file-transfer channel
+	host        string // remote host — to pull files from
+	basePort    int    // file-transfer port (MessagePort-1)
 	lastHash    string // hash of last clipboard content we sent
+	localFile   string // local file currently on the clipboard, offered to peers
 	mu          sync.Mutex
 	recvBuf     bytes.Buffer // accumulates incoming clipboard chunks
 	receiving   bool
@@ -46,12 +52,16 @@ type Manager struct {
 	wg          sync.WaitGroup // tracks pollClipboard goroutine for clean shutdown
 }
 
-// NewManager creates a clipboard manager.
-func NewManager(conn *network.Conn, display string) *Manager {
+// NewManager creates a clipboard manager. key/host/basePort enable file transfer
+// over the separate MWB clipboard channel; pass an empty key to disable it.
+func NewManager(conn *network.Conn, display, key, host string, basePort int) *Manager {
 	return &Manager{
-		conn:    conn,
-		display: display,
-		stopCh:  make(chan struct{}),
+		conn:     conn,
+		display:  display,
+		key:      key,
+		host:     host,
+		basePort: basePort,
+		stopCh:   make(chan struct{}),
 	}
 }
 
@@ -62,6 +72,9 @@ func (m *Manager) Start() {
 		defer m.wg.Done()
 		m.pollClipboard()
 	}()
+	if m.key != "" {
+		go m.serveFiles() // serve files to peers that pull from us
+	}
 	slog.Info("clipboard sharing enabled")
 }
 
@@ -79,12 +92,37 @@ func (m *Manager) HandlePacket(pkt *protocol.Packet) {
 	case protocol.ClipboardDataEnd:
 		m.handleEnd(pkt)
 	case protocol.Clipboard:
-		slog.Debug("clipboard beat received from remote")
+		slog.Debug("clipboard beat received from remote", "src", pkt.Src, "len", len(pkt.Raw))
+		// MWB is a pull model: the beat says "my clipboard changed". Pull it over
+		// the file-transfer channel — files are saved + put on our clipboard;
+		// text/image come in-band so the pull skips them. Skip if we just set the
+		// clipboard ourselves, to avoid a loop.
+		m.mu.Lock()
+		recentlySet := time.Since(m.justSet) < 3*time.Second
+		m.mu.Unlock()
+		if !recentlySet && m.key != "" {
+			go m.pullRemoteFile()
+		}
 	case protocol.ClipboardAsk:
-		slog.Debug("clipboard ask received — sending current clipboard")
-		go m.sendClipboard()
+		// The remote wants our clipboard. For a file, push it to the asker's
+		// file-transfer port (MWB's owner-pushes-on-ask model). Otherwise fall
+		// back to the in-band text path.
+		slog.Debug("clipboard ask received", "src", pkt.Src, "des", pkt.Des)
+		if pkt.Des != m.conn.MachineID {
+			break // ask addressed to a different machine
+		}
+		m.mu.Lock()
+		path := m.localFile
+		m.mu.Unlock()
+		if path != "" && m.key != "" && m.host != "" {
+			go m.pushFile(m.host, path)
+		} else {
+			go m.sendClipboard()
+		}
+	case protocol.ClipboardPush:
+		slog.Debug("clipboard push received", "len", len(pkt.Raw), "hex", hex.EncodeToString(pkt.Raw))
 	default:
-		slog.Debug("unhandled clipboard packet", "type", pkt.Type)
+		slog.Debug("unhandled clipboard packet", "type", pkt.Type, "len", len(pkt.Raw), "hex", hex.EncodeToString(pkt.Raw))
 	}
 }
 
@@ -104,6 +142,26 @@ func (m *Manager) pollClipboard() {
 			m.mu.Unlock()
 			if recentlySet {
 				continue
+			}
+
+			// Check for a file on the clipboard first — beat so peers can pull it
+			// over the file-transfer channel (file bytes don't go in-band).
+			if m.key != "" {
+				if path := m.getLocalClipboardFile(); path != "" {
+					hash := "file:" + path
+					m.mu.Lock()
+					changed := hash != m.lastHash
+					if changed {
+						m.lastHash = hash
+						m.localFile = path
+					}
+					m.mu.Unlock()
+					if changed {
+						slog.Info("file on clipboard, notifying remote", "path", path)
+						m.sendBeat()
+					}
+					continue
+				}
 			}
 
 			// Check for image clipboard first
@@ -150,6 +208,44 @@ func (m *Manager) pollClipboard() {
 			}
 		}
 	}
+}
+
+// pullRemoteFile pulls the remote clipboard over the file-transfer channel and,
+// if it's a file, saves it and puts it on the local clipboard.
+func (m *Manager) pullRemoteFile() {
+	if m.host == "" {
+		return
+	}
+	path, err := pullFile(m.host, m.basePort, m.key, m.conn.MachineID, m.conn.LocalName, fileSaveDir())
+	if err != nil {
+		slog.Debug("clipboard file pull failed", "err", err)
+		return
+	}
+	if path == "" {
+		return // text/image — handled in-band
+	}
+	m.mu.Lock()
+	m.justSet = time.Now()
+	m.localFile = path
+	m.lastHash = "file:" + path // don't re-beat the file we just received
+	m.mu.Unlock()
+	m.setLocalFileClipboard(path)
+}
+
+// sendBeat notifies peers that our clipboard changed (pull model). Peers then
+// pull the data from our file-transfer server.
+func (m *Manager) sendBeat() {
+	pkt := &protocol.Packet{Type: protocol.Clipboard, Src: m.conn.MachineID, Des: protocol.IDAll}
+	pkt.SetMachineName(m.conn.LocalName)
+	if err := m.conn.SendPacket(pkt); err != nil {
+		slog.Debug("send clipboard beat failed", "err", err)
+	}
+}
+
+// fileSaveDir is where pulled files are written.
+func fileSaveDir() string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, "Downloads", "MouseWithoutBorders")
 }
 
 // sendClipboard sends the current clipboard to the remote.
@@ -338,21 +434,26 @@ func (m *Manager) handleImageClipboard(data []byte) {
 		return
 	}
 
-	// Set image clipboard via xclip
+	// Set image clipboard: wl-copy on Wayland, xclip on X11.
+	var setCmd []string
+	if onWayland() {
+		setCmd = []string{"wl-copy", "--type", mimeType}
+	} else {
+		setCmd = []string{"xclip", "-selection", "clipboard", "-t", mimeType, "-i", tmpFile}
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), execTimeout)
-	cmd := exec.CommandContext(ctx, "xclip", "-selection", "clipboard", "-t", mimeType, "-i", tmpFile)
-	cmd.Env = append(os.Environ(), "DISPLAY="+m.display)
+	cmd := exec.CommandContext(ctx, setCmd[0], setCmd[1:]...)
+	if onWayland() {
+		f, _ := os.Open(tmpFile)
+		defer f.Close() //nolint:errcheck
+		cmd.Stdin = f
+	} else {
+		cmd.Env = append(os.Environ(), "DISPLAY="+m.display)
+	}
 	err := cmd.Run()
 	cancel()
 	if err != nil {
-		slog.Error("set image clipboard via xclip failed", "err", err, "mime", mimeType)
-		ctx2, cancel2 := context.WithTimeout(context.Background(), execTimeout)
-		cmd2 := exec.CommandContext(ctx2, "xclip", "-selection", "clipboard", "-t", "image/png", "-i", tmpFile)
-		cmd2.Env = append(os.Environ(), "DISPLAY="+m.display)
-		if err2 := cmd2.Run(); err2 != nil {
-			slog.Error("set image clipboard fallback also failed", "err", err2)
-		}
-		cancel2()
+		slog.Error("set image clipboard failed", "err", err, "mime", mimeType, "wayland", onWayland())
 		return
 	}
 
@@ -366,18 +467,18 @@ func (m *Manager) handleImageClipboard(data []byte) {
 }
 
 // getLocalClipboard reads the current clipboard text.
+// On Wayland, xclip reads a stale XWayland clipboard, so use wl-paste there.
 // Times out after execTimeout to prevent blocking the poll goroutine indefinitely.
 func (m *Manager) getLocalClipboard() string {
-	for _, args := range [][]string{
+	cmds := [][]string{
 		{"xclip", "-selection", "clipboard", "-o"},
 		{"xsel", "--clipboard", "--output"},
-	} {
-		ctx, cancel := context.WithTimeout(context.Background(), execTimeout)
-		cmd := exec.CommandContext(ctx, args[0], args[1:]...)
-		cmd.Env = append(os.Environ(), "DISPLAY="+m.display)
-		out, err := cmd.Output()
-		cancel()
-		if err == nil {
+	}
+	if onWayland() {
+		cmds = [][]string{{"wl-paste", "--no-newline"}}
+	}
+	for _, args := range cmds {
+		if out, err := m.runClip(args); err == nil {
 			return string(out)
 		}
 	}
@@ -387,13 +488,19 @@ func (m *Manager) getLocalClipboard() string {
 // setLocalClipboard sets the clipboard text.
 // Times out after execTimeout to prevent blocking on a hung xclip/xsel.
 func (m *Manager) setLocalClipboard(text string) {
-	for _, args := range [][]string{
+	cmds := [][]string{
 		{"xclip", "-selection", "clipboard"},
 		{"xsel", "--clipboard", "--input"},
-	} {
+	}
+	if onWayland() {
+		cmds = [][]string{{"wl-copy"}}
+	}
+	for _, args := range cmds {
 		ctx, cancel := context.WithTimeout(context.Background(), execTimeout)
 		cmd := exec.CommandContext(ctx, args[0], args[1:]...)
-		cmd.Env = append(os.Environ(), "DISPLAY="+m.display)
+		if !onWayland() {
+			cmd.Env = append(os.Environ(), "DISPLAY="+m.display)
+		}
 		cmd.Stdin = strings.NewReader(text)
 		err := cmd.Run()
 		cancel()
@@ -401,25 +508,22 @@ func (m *Manager) setLocalClipboard(text string) {
 			return
 		}
 	}
-	slog.Error("set clipboard failed — both xclip and xsel failed")
+	slog.Error("set clipboard failed", "wayland", onWayland())
 }
 
 // getLocalImageClipboard checks if clipboard contains an image and returns it.
 func (m *Manager) getLocalImageClipboard() []byte {
-	ctx, cancel := context.WithTimeout(context.Background(), execTimeout)
-	cmd := exec.CommandContext(ctx, "xclip", "-selection", "clipboard", "-t", "TARGETS", "-o")
-	cmd.Env = append(os.Environ(), "DISPLAY="+m.display)
-	out, err := cmd.Output()
-	cancel()
+	listCmd := []string{"xclip", "-selection", "clipboard", "-t", "TARGETS", "-o"}
+	getCmd := []string{"xclip", "-selection", "clipboard", "-t", "image/png", "-o"}
+	if onWayland() {
+		listCmd = []string{"wl-paste", "--list-types"}
+		getCmd = []string{"wl-paste", "--type", "image/png"}
+	}
+	out, err := m.runClip(listCmd)
 	if err != nil || !strings.Contains(string(out), "image/png") {
 		return nil
 	}
-
-	ctx2, cancel2 := context.WithTimeout(context.Background(), execTimeout)
-	cmd2 := exec.CommandContext(ctx2, "xclip", "-selection", "clipboard", "-t", "image/png", "-o")
-	cmd2.Env = append(os.Environ(), "DISPLAY="+m.display)
-	imgData, err := cmd2.Output()
-	cancel2()
+	imgData, err := m.runClip(getCmd)
 	if err != nil || len(imgData) == 0 {
 		return nil
 	}

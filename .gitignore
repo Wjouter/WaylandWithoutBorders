@@ -25,3 +25,6 @@ Thumbs.db
 .env
 *.key
 *.pem
+
+# Local reference clone of PowerToys (MWB protocol source) — never commit
+/PowerToys/

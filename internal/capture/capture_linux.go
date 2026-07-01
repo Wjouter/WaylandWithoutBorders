@@ -9,6 +9,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"log/slog"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -26,18 +27,26 @@ const (
 	evKey = 0x01
 	evRel = 0x02
 
-	relX     = 0x00
-	relY     = 0x01
-	relWheel = 0x08
+	relX      = 0x00
+	relY      = 0x01
+	relHWheel = 0x06
+	relWheel  = 0x08
 
 	inputEventSize = 24
 
-	// Default remote screen dimensions — auto-detected from incoming packets
-	defaultRemoteWidth  = 1920
-	defaultRemoteHeight = 1080
+	// The MWB wire protocol carries absolute cursor coordinates on a normalized
+	// 0..normMax grid, so the receiver maps them to its own resolution. We track
+	// the virtual remote cursor in that same normalized space — that's why no
+	// remote screen resolution is needed (the Windows side auto-maps it).
+	normMax = 65535
 
-	// Default scaling applied to raw evdev deltas. Approximates libinput's flat
-	// profile (speed 0.766 → ~1.766, rounded to 2). Overridable via config.
+	// switchMargin is how far (in normalized units) inside the remote we enter
+	// from, and how far you must move back before a return is armed. ~10% of the
+	// range, matching the old 200px-of-1920 debounce.
+	switchMargin = normMax / 10
+
+	// Default speed multiplier on top of proportional (1:1 screen) mapping.
+	// 2.0 ≈ traverse the remote in half a local-screen sweep, matching the old feel.
 	defaultAccelMultiplier = 2.0
 )
 
@@ -68,17 +77,23 @@ type Capturer struct {
 	lastSwitch        time.Time      // debounce outgoing switches
 	switchSent        time.Time      // when we last sent switch packets
 	lastActivated     time.Time      // when cursor last arrived on this machine
-	remoteX           int32          // virtual cursor position on remote (pixels)
-	remoteY           int32          // virtual cursor position on remote (pixels)
-	remoteW           int32          // detected remote screen width
-	remoteH           int32          // detected remote screen height
-	accelMult         float64        // scaling applied to raw evdev deltas (config: accel_multiplier)
+	remoteX           int32          // virtual cursor position on remote (normalized 0..normMax)
+	remoteY           int32          // virtual cursor position on remote (normalized 0..normMax)
+	accX              float64        // sub-pixel motion carry
+	accY              float64        // sub-pixel motion carry
+	activeEdge        string         // edge we crossed into the remote on: left/right/top/bottom
+	accelMult         float64        // speed multiplier on the normalized mapping (config: accel_multiplier)
 	edgeY             int32          // Y position where cursor left local screen
 	canSwitch         bool           // true once cursor has been away from edge since activation
 	canReturn         bool           // true once cursor has moved away from the remote return edge
 	hotkeyCtrl        bool           // tracks Ctrl key state for hotkey detection
 	hotkeyAlt         bool           // tracks Alt key state for hotkey detection
 	disabledXinputIDs []int          // device IDs we disabled — re-enable same set to avoid TOCTOU
+
+	// returnLocal, when set, replaces the X11 xdotool+xinput "return to local"
+	// action. The Wayland portal driver sets this to call portal Release (which
+	// both stops capture and warps the local cursor). nil on X11.
+	returnLocal func(x, y int32)
 }
 
 // New creates a new input capturer.
@@ -87,15 +102,14 @@ type Capturer struct {
 // here can corrupt the attachment state of floating slave devices.
 func New(conn *network.Conn, screen ScreenInfo, edgeSide string) *Capturer {
 	return &Capturer{
-		conn:      conn,
-		screen:    screen,
-		active:    true,
-		edgeSide:  edgeSide,
-		stopCh:    make(chan struct{}),
-		remoteW:   defaultRemoteWidth,
-		remoteH:   defaultRemoteHeight,
-		accelMult: defaultAccelMultiplier,
-		canSwitch: true, // allow first switch immediately
+		conn:       conn,
+		screen:     screen,
+		active:     true,
+		edgeSide:   edgeSide,
+		activeEdge: edgeSide, // X11 default; Wayland overrides per crossing
+		stopCh:     make(chan struct{}),
+		accelMult:  defaultAccelMultiplier,
+		canSwitch:  true, // allow first switch immediately
 	}
 }
 
@@ -122,6 +136,79 @@ func (c *Capturer) SetActive(active bool) {
 	}
 }
 
+// EnterRemoteEdge sets up the virtual-cursor state when control crosses to the
+// remote host across the given local edge. perpFrac is the cursor position along
+// that edge as a fraction (0..1) — Y for left/right, X for top/bottom. We enter
+// switchMargin inside from the return edge so momentum doesn't bounce straight
+// back; the perpendicular axis carries the crossing point.
+func (c *Capturer) EnterRemoteEdge(edge string, perpFrac float64) {
+	if perpFrac < 0 {
+		perpFrac = 0
+	} else if perpFrac > 1 {
+		perpFrac = 1
+	}
+	perp := int32(perpFrac * normMax)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.active = false
+	c.switchSent = time.Now()
+	c.activeEdge = edge
+	switch edge {
+	case "right":
+		c.remoteX, c.remoteY = switchMargin, perp
+	case "top":
+		c.remoteX, c.remoteY = perp, normMax-switchMargin
+	case "bottom":
+		c.remoteX, c.remoteY = perp, switchMargin
+	default: // left
+		c.remoteX, c.remoteY = normMax-switchMargin, perp
+	}
+	c.accX, c.accY = 0, 0
+	c.canReturn = false
+}
+
+// EdgeReentry returns a local pixel position just inside the given edge,
+// carrying the perpendicular fraction. Used to park the cursor when a modifier-
+// gated switch is declined, so it stays on the local screen near where it hit.
+func (c *Capturer) EdgeReentry(edge string, perpFrac float64) (x, y int32) {
+	const inset = 12
+	px := int32(perpFrac * float64(c.screen.Width))
+	py := int32(perpFrac * float64(c.screen.Height))
+	switch edge {
+	case "right":
+		return c.screen.Width - inset, py
+	case "top":
+		return px, inset
+	case "bottom":
+		return px, c.screen.Height - inset
+	default: // left
+		return inset, py
+	}
+}
+
+// NotifyRemoteSwitch tells the remote host it now owns the cursor (the MWB
+// MachineSwitched handoff). Besides the formal switch, this is what makes the
+// remote pull our clipboard when we've just copied a file/large data (it checks
+// for a recent clipboard beat on MachineSwitched). Call it right after we cross
+// to the remote.
+func (c *Capturer) NotifyRemoteSwitch() {
+	pkt := &protocol.Packet{
+		Type: protocol.MachineSwitched,
+		Src:  c.conn.MachineID,
+		Des:  c.conn.RemoteID,
+	}
+	if err := c.conn.SendPacket(pkt); err != nil {
+		slog.Debug("send MachineSwitched failed", "err", err)
+	}
+}
+
+// FeedEvent injects a normalized input event into the shared forwarding path.
+// Used by the Wayland portal driver; the X11 path calls handleEvent directly
+// from its evdev readers. Both funnel into the same handleRel/handleKey logic.
+func (c *Capturer) FeedEvent(typ, code uint16, value int32) {
+	c.handleEvent(inputEvent{Type: typ, Code: code, Value: value})
+}
+
 // IsActive returns true if cursor is on this machine.
 func (c *Capturer) IsActive() bool {
 	c.mu.Lock()
@@ -144,25 +231,6 @@ func (c *Capturer) SafeEntryPosition() (x, y int32) {
 		x = c.screen.Width / 2
 	}
 	return x, y
-}
-
-// UpdateRemoteScreen detects remote screen dimensions from incoming Mouse packets.
-// Called by the handler when we receive absolute mouse coordinates from the server.
-func (c *Capturer) UpdateRemoteScreen(absX, absY int32) {
-	// MWB absolute coords are 0-65535. We can't directly detect resolution from them.
-	// But we can detect it from the Matrix/HeartbeatEx packets or config.
-	// For now, this is a placeholder — resolution comes from config or is auto-detected.
-}
-
-// SetRemoteScreen sets the remote screen dimensions.
-func (c *Capturer) SetRemoteScreen(w, h int32) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if w > 0 && h > 0 && (w != c.remoteW || h != c.remoteH) {
-		c.remoteW = w
-		c.remoteH = h
-		slog.Info("remote screen dimensions updated", "width", w, "height", h)
-	}
 }
 
 // SetAccelMultiplier sets the scaling applied to raw evdev deltas before they
@@ -318,19 +386,24 @@ func (c *Capturer) pollCursorEdge() {
 				c.active = false
 				c.switchSent = time.Now()
 				c.edgeY = y
-				// Set virtual cursor offset from the return edge to prevent jitter bounce.
-				// Entry is 200px from the return edge — gives room for mouse momentum.
+				c.activeEdge = c.edgeSide
+				c.accX, c.accY = 0, 0
+				// Virtual cursor offset switchMargin from the return edge (normalized
+				// 0..normMax space) to give mouse momentum room before a return arms.
 				if c.edgeSide == "left" {
-					c.remoteX = c.remoteW - 200
+					c.remoteX = normMax - switchMargin
 				} else {
-					c.remoteX = 200
+					c.remoteX = switchMargin
 				}
-				c.remoteY = int32(float64(y) / float64(c.screen.Height) * float64(c.remoteH))
+				c.remoteY = int32(float64(y) / float64(c.screen.Height) * normMax)
 				c.canReturn = false // must move away from return edge first
 				c.mu.Unlock()
 
 				// Disable local input in X11 (synchronous — only takes ~2ms)
 				c.disableXinput()
+
+				// Formal handoff — also triggers the remote to pull our clipboard.
+				c.NotifyRemoteSwitch()
 
 				// Send mouse burst to the entry position on remote
 				// Multiple packets help Windows MWB register the switch reliably
@@ -662,119 +735,200 @@ func (c *Capturer) handleEvent(ev inputEvent) {
 	}
 }
 
-// applyAcceleration scales raw evdev deltas by mult. The Windows side does no
-// acceleration of its own (absolute positioning), so mult is the only
-// cursor-speed control. Sub-pixel results are clamped to ±1 so slow movements
-// still register and the cursor can always reach the return edge.
-func applyAcceleration(delta int32, mult float64) int32 {
-	scaled := float64(delta) * mult
-	if scaled > 0 && scaled < 1 {
-		return 1
+// pick returns down if cond else up — for choosing button DOWN/UP flags.
+func pick(cond bool, down, up int32) int32 {
+	if cond {
+		return down
 	}
-	if scaled < 0 && scaled > -1 {
-		return -1
+	return up
+}
+
+func (c *Capturer) clampRemoteLocked() {
+	if c.remoteX < 0 {
+		c.remoteX = 0
 	}
-	return int32(scaled)
+	if c.remoteX > normMax {
+		c.remoteX = normMax
+	}
+	if c.remoteY < 0 {
+		c.remoteY = 0
+	}
+	if c.remoteY > normMax {
+		c.remoteY = normMax
+	}
+}
+
+// normPerPx returns how many normalized units one local pixel maps to on each
+// axis. Moving the full local screen width thus sweeps the full remote range
+// (times accel_multiplier). Guards against a zero screen size.
+func (c *Capturer) normPerPx() (x, y float64) {
+	w, h := c.screen.Width, c.screen.Height
+	if w <= 0 {
+		w = 1
+	}
+	if h <= 0 {
+		h = 1
+	}
+	return float64(normMax) / float64(w), float64(normMax) / float64(h)
+}
+
+// addMotionLocked accumulates already-scaled normalized deltas with sub-pixel
+// carry and applies them to the virtual cursor. Shared by handleRel (X11,
+// per-axis) and FeedMotion (Wayland, combined).
+func (c *Capturer) addMotionLocked(dxNorm, dyNorm float64) {
+	c.accX += dxNorm
+	c.accY += dyNorm
+	ix := math.Trunc(c.accX)
+	iy := math.Trunc(c.accY)
+	c.accX -= ix
+	c.accY -= iy
+	c.remoteX += int32(ix)
+	c.remoteY += int32(iy)
+	c.clampRemoteLocked()
 }
 
 func (c *Capturer) handleRel(ev inputEvent) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	nppx, nppy := c.normPerPx()
 	switch ev.Code {
 	case relX:
-		c.remoteX += applyAcceleration(ev.Value, c.accelMult)
-		if c.remoteX < 0 {
-			c.remoteX = 0
-		}
-		if c.remoteX > c.remoteW {
-			c.remoteX = c.remoteW
-		}
+		c.addMotionLocked(float64(ev.Value)*c.accelMult*nppx, 0)
 	case relY:
-		c.remoteY += applyAcceleration(ev.Value, c.accelMult)
-		if c.remoteY < 0 {
-			c.remoteY = 0
-		}
-		if c.remoteY > c.remoteH {
-			c.remoteY = c.remoteH
-		}
+		c.addMotionLocked(0, float64(ev.Value)*c.accelMult*nppy)
 	case relWheel:
-		c.sendMouseLocked(0, 0, ev.Value*120, protocol.WM_MOUSEWHEEL)
+		// evdev REL_WHEEL is +1 per notch up; Windows WHEEL_DELTA is +120 up — same
+		// direction. Send at the current cursor position so it scrolls the right window.
+		c.sendMouseLocked(c.remoteX, c.remoteY, ev.Value*120, protocol.WM_MOUSEWHEEL)
+		return
+	case relHWheel:
+		c.sendMouseLocked(c.remoteX, c.remoteY, ev.Value*120, protocol.WM_MOUSEHWHEEL)
 		return
 	default:
 		return
 	}
+	c.afterMotionLocked()
+}
 
-	// canReturn gate: must move 200px away from return edge before allowing return.
-	// This prevents jitter/momentum from the initial switch from bouncing back.
-	returnZone := int32(200)
-	switch c.edgeSide {
-	case "left":
-		if c.remoteX < c.remoteW-returnZone {
-			c.canReturn = true
-		}
-	case "right":
-		if c.remoteX > returnZone {
-			c.canReturn = true
-		}
+// FeedWheel forwards a scroll to the remote at the current cursor position.
+// Units are Windows WHEEL_DELTA (±120 per notch): vertical>0 scrolls up,
+// horizontal>0 scrolls right. Used by the Wayland driver for wheel and touchpad.
+func (c *Capturer) FeedWheel(vertical, horizontal int32) {
+	if c.IsActive() {
+		return
 	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if vertical != 0 {
+		c.sendMouseLocked(c.remoteX, c.remoteY, vertical, protocol.WM_MOUSEWHEEL)
+	}
+	if horizontal != 0 {
+		c.sendMouseLocked(c.remoteX, c.remoteY, horizontal, protocol.WM_MOUSEHWHEEL)
+	}
+}
 
-	// Check if virtual cursor hit the return edge (opposite of edgeSide)
+// FeedMotion applies a combined relative motion (both axes at once) and sends a
+// single mouse packet. The EI/Wayland source delivers dx and dy together, so
+// feeding them as one update avoids the per-axis double-send that stair-steps
+// diagonal motion. Sub-pixel deltas are accumulated so slow movement stays smooth.
+func (c *Capturer) FeedMotion(dx, dy float64) {
+	if c.IsActive() {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.switchSent.IsZero() && time.Since(c.switchSent) < 100*time.Millisecond {
+		return
+	}
+	nppx, nppy := c.normPerPx()
+	c.addMotionLocked(dx*c.accelMult*nppx, dy*c.accelMult*nppy)
+	c.afterMotionLocked()
+}
+
+// afterMotionLocked evaluates the return-edge gate and forwards the new cursor
+// position. Caller must hold c.mu. Shared by handleRel (per-axis, X11) and
+// FeedMotion (combined, Wayland).
+func (c *Capturer) afterMotionLocked() {
+	// canReturn gate: must move switchMargin away from the entry edge before a
+	// return is armed — prevents the initial momentum from bouncing straight back.
+	// switchBack fires when the virtual cursor crosses back over that same edge.
 	switchBack := false
-	if c.canReturn {
-		switch c.edgeSide {
-		case "left":
-			// We switched to remote via left edge, return via right edge of remote
-			if c.remoteX >= c.remoteW-1 {
-				switchBack = true
-			}
-		case "right":
-			if c.remoteX <= 0 {
-				switchBack = true
-			}
+	switch c.activeEdge {
+	case "right":
+		if c.remoteX > switchMargin {
+			c.canReturn = true
 		}
+		switchBack = c.canReturn && c.remoteX <= 0
+	case "top":
+		if c.remoteY < normMax-switchMargin {
+			c.canReturn = true
+		}
+		switchBack = c.canReturn && c.remoteY >= normMax-1
+	case "bottom":
+		if c.remoteY > switchMargin {
+			c.canReturn = true
+		}
+		switchBack = c.canReturn && c.remoteY <= 0
+	default: // left
+		if c.remoteX < normMax-switchMargin {
+			c.canReturn = true
+		}
+		switchBack = c.canReturn && c.remoteX >= normMax-1
 	}
 
 	// Log virtual position periodically for debugging
-	if c.remoteX%200 == 0 || switchBack {
-		slog.Debug("virtual cursor", "x", c.remoteX, "y", c.remoteY, "switchBack", switchBack)
+	if c.remoteX%2000 == 0 || switchBack {
+		slog.Debug("virtual cursor", "x", c.remoteX, "y", c.remoteY, "edge", c.activeEdge, "switchBack", switchBack)
 	}
 
 	if switchBack {
-		remY := c.remoteY
-		remH := c.remoteH
-		slog.Info("remote edge hit — switching back to Ubuntu", "remoteX", c.remoteX, "remoteY", remY)
+		slog.Info("remote edge hit — switching back to local", "edge", c.activeEdge, "remoteX", c.remoteX, "remoteY", c.remoteY)
+		entryX, entryY := c.localReentryLocked()
 		c.active = true
 		c.switchSent = time.Time{}
 		c.lastActivated = time.Now()
 		c.canSwitch = false // block re-trigger until cursor moves away from edge
 		c.mu.Unlock()
 
-		// Move cursor away from edge SYNCHRONOUSLY before enabling xinput
-		var entryX int32
-		if c.edgeSide == "left" {
-			entryX = 100
+		if c.returnLocal != nil {
+			// Wayland: portal Release stops capture and warps the cursor.
+			c.returnLocal(entryX, entryY)
 		} else {
-			entryX = c.screen.Width - 100
+			// X11: warp the cursor away from the edge before re-enabling devices.
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			cmd := exec.CommandContext(ctx, "xdotool", "mousemove", "--",
+				fmt.Sprintf("%d", entryX),
+				fmt.Sprintf("%d", entryY))
+			cmd.Env = append(os.Environ(), "DISPLAY="+getDisplay())
+			_ = cmd.Run()
+			cancel()
+			c.enableXinput()
 		}
-		entryY := int32(float64(remY) / float64(remH) * float64(c.screen.Height))
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		cmd := exec.CommandContext(ctx, "xdotool", "mousemove", "--",
-			fmt.Sprintf("%d", entryX),
-			fmt.Sprintf("%d", entryY))
-		cmd.Env = append(os.Environ(), "DISPLAY="+getDisplay())
-		_ = cmd.Run()
-		cancel()
-
-		c.enableXinput()
 		c.mu.Lock()
 		return
 	}
 
-	// Send absolute mouse position to remote
-	absX := int32(float64(c.remoteX) / float64(c.remoteW) * 65535)
-	absY := int32(float64(c.remoteY) / float64(c.remoteH) * 65535)
-	c.sendMouseLocked(absX, absY, 0, protocol.WM_MOUSEMOVE)
+	// remoteX/remoteY are already in the wire's 0..normMax space — send directly.
+	c.sendMouseLocked(c.remoteX, c.remoteY, 0, protocol.WM_MOUSEMOVE)
+}
+
+// localReentryLocked maps the virtual cursor back to a local pixel position just
+// inside the edge we originally left, carrying the perpendicular coordinate.
+func (c *Capturer) localReentryLocked() (x, y int32) {
+	const inset = 100
+	px := int32(float64(c.remoteX) / normMax * float64(c.screen.Width))
+	py := int32(float64(c.remoteY) / normMax * float64(c.screen.Height))
+	switch c.activeEdge {
+	case "right":
+		return c.screen.Width - inset, py
+	case "top":
+		return px, inset
+	case "bottom":
+		return px, c.screen.Height - inset
+	default: // left
+		return inset, py
+	}
 }
 
 func (c *Capturer) handleKey(ev inputEvent) {
@@ -795,46 +949,37 @@ func (c *Capturer) handleKey(ev inputEvent) {
 		}
 	}
 
-	// Mouse buttons
-	if ev.Code >= 0x110 && ev.Code <= 0x112 {
+	// Mouse buttons (left/right/middle + side buttons X1/X2 for back/forward).
+	if ev.Code >= input.BTN_LEFT && ev.Code <= input.BTN_EXTRA {
 		if !c.IsActive() {
-			var flags int32
+			if ev.Value != 0 && ev.Value != 1 {
+				return // ignore auto-repeat on buttons
+			}
+			down := ev.Value == 1
+			var flags, wheel int32
 			switch ev.Code {
 			case input.BTN_LEFT:
-				switch ev.Value {
-				case 1:
-					flags = protocol.WM_LBUTTONDOWN
-				case 0:
-					flags = protocol.WM_LBUTTONUP
-				default:
-					return
-				}
+				flags = pick(down, protocol.WM_LBUTTONDOWN, protocol.WM_LBUTTONUP)
 			case input.BTN_RIGHT:
-				switch ev.Value {
-				case 1:
-					flags = protocol.WM_RBUTTONDOWN
-				case 0:
-					flags = protocol.WM_RBUTTONUP
-				default:
-					return
-				}
+				flags = pick(down, protocol.WM_RBUTTONDOWN, protocol.WM_RBUTTONUP)
 			case input.BTN_MIDDLE:
-				switch ev.Value {
-				case 1:
-					flags = protocol.WM_MBUTTONDOWN
-				case 0:
-					flags = protocol.WM_MBUTTONUP
-				default:
-					return
-				}
+				flags = pick(down, protocol.WM_MBUTTONDOWN, protocol.WM_MBUTTONUP)
+			case input.BTN_SIDE: // X1 (back)
+				flags = pick(down, protocol.WM_XBUTTONDOWN, protocol.WM_XBUTTONUP)
+				wheel = 0x0001 << 16 // XBUTTON1 in the mouseData high word
+			case input.BTN_EXTRA: // X2 (forward)
+				flags = pick(down, protocol.WM_XBUTTONDOWN, protocol.WM_XBUTTONUP)
+				wheel = 0x0002 << 16 // XBUTTON2 in the mouseData high word
+			default:
+				return
 			}
-			// Use current virtual cursor position so clicks register at the
-			// correct location on Windows, not always at top-left (0,0).
+			// Send at the current virtual cursor position so the click lands where
+			// the cursor is, not at (0,0). remoteX/remoteY are already in wire space.
 			c.mu.Lock()
-			absX := int32(float64(c.remoteX) / float64(c.remoteW) * 65535)
-			absY := int32(float64(c.remoteY) / float64(c.remoteH) * 65535)
+			absX, absY := c.remoteX, c.remoteY
 			c.mu.Unlock()
-			c.sendMouse(absX, absY, 0, flags)
+			slog.Debug("forwarding mouse button", "code", ev.Code, "down", down, "flags", flags)
+			c.sendMouse(absX, absY, wheel, flags)
 		}
 		return
 	}

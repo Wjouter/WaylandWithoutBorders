@@ -105,7 +105,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/mwb -bidi -edge left
+ExecStart=/usr/local/bin/mwb
 Restart=on-failure
 RestartSec=5
 # DISPLAY and XAUTHORITY are auto-detected by the mwb binary.

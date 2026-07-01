@@ -21,6 +21,12 @@ import (
 )
 
 func main() {
+	// `mwb gui` launches the local web configuration UI instead of the daemon.
+	if len(os.Args) > 1 && os.Args[1] == "gui" {
+		runGUI(os.Args[2:])
+		return
+	}
+
 	configPath := flag.String("config", "", "path to config.toml")
 	debug := flag.Bool("debug", false, "enable debug logging")
 	edgeSide := flag.String("edge", "", "screen edge to switch: left or right (overrides config)")
@@ -56,13 +62,17 @@ func main() {
 		*edgeSide = "right" // final fallback
 	}
 
+	// Bidirectional turns on if either the flag or config requests it, so the
+	// GUI can toggle it via config without editing the systemd unit.
+	bidi := *bidirectional || cfg.Bidirectional
+
 	// Clipboard runs by default. Either config (clipboard = false) or the
 	// --no-clipboard flag disables it; the flag wins over config.
 	clipboardEnabled := cfg.ClipboardEnabled() && !*noClipboard
 	keyboardLayout := input.ResolveKeyboardLayout(cfg.KeyboardLayout)
 
 	slog.Debug("debug logging enabled")
-	slog.Info("mwb starting", "host", cfg.Host, "port", cfg.MessagePort(), "name", cfg.Name, "bidirectional", *bidirectional, "edge", *edgeSide, "clipboard", clipboardEnabled, "keyboard_layout", keyboardLayout)
+	slog.Info("mwb starting", "host", cfg.Host, "port", cfg.MessagePort(), "name", cfg.Name, "bidirectional", bidi, "edge", *edgeSide, "clipboard", clipboardEnabled, "keyboard_layout", keyboardLayout)
 
 	mouse, err := input.CreateVirtualMouse("mwb-mouse")
 	if err != nil {
@@ -140,22 +150,29 @@ func main() {
 			// Start clipboard sharing on the auto-detected display unless disabled.
 			var clipMgr *clipboard.Manager
 			if clipboardEnabled {
-				clipMgr = clipboard.NewManager(conn, capture.DetectDisplay())
+				clipMgr = clipboard.NewManager(conn, capture.DetectDisplay(), cfg.Key, cfg.Host, cfg.Port)
 				handler.Clipboard = clipMgr
 				clipMgr.Start()
 			}
 
-			// Start bidirectional capture if enabled
+			// Start bidirectional capture if enabled. On Wayland the X11
+			// xdotool/xinput path can't work, so use the InputCapture portal driver.
 			var cap *capture.Capturer
-			if *bidirectional {
+			var capStop func()
+			if bidi && isWayland() {
+				edges := cfg.EnabledEdges()
+				if len(edges) == 0 {
+					slog.Info("edge switching disabled (edges = none); not capturing")
+				} else if c, stop, err := capture.RunWayland(conn, handler, *edgeSide, edges, cfg.SwitchModifier, cfg.AccelMultiplier); err != nil {
+					slog.Error("wayland capture start failed", "err", err)
+				} else {
+					cap, capStop = c, stop
+				}
+			} else if bidi {
 				screen := capture.GetScreenSizeXrandr()
 				slog.Info("screen detected", "width", screen.Width, "height", screen.Height)
 
 				cap = capture.New(conn, screen, *edgeSide)
-				// Wire remote screen dimensions from config so virtual cursor
-				// coordinate mapping is correct for non-1080p Windows displays.
-				cap.SetRemoteScreen(int32(cfg.RemoteWidth), int32(cfg.RemoteHeight))
-				slog.Info("remote screen configured", "width", cfg.RemoteWidth, "height", cfg.RemoteHeight)
 				// Cursor speed: the only acceleration knob lives here (Windows
 				// applies none of its own), so honor the configured multiplier.
 				cap.SetAccelMultiplier(cfg.AccelMultiplier)
@@ -201,7 +218,9 @@ func main() {
 			}
 
 			// Stop capture first — prevents in-flight SendPacket after conn.Close()
-			if cap != nil {
+			if capStop != nil {
+				capStop() // Wayland: tears down the portal + libei
+			} else if cap != nil {
 				cap.Stop()
 			}
 
@@ -216,4 +235,10 @@ func main() {
 
 	sig := <-sigCh
 	slog.Info("shutting down", "signal", sig)
+}
+
+// isWayland reports whether we're running under a Wayland session, in which
+// case the X11 xdotool/xinput bidi path won't work and we use the portal driver.
+func isWayland() bool {
+	return os.Getenv("XDG_SESSION_TYPE") == "wayland" || os.Getenv("WAYLAND_DISPLAY") != ""
 }
