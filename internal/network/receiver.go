@@ -27,7 +27,12 @@ func startHeartbeat(conn *Conn, stop chan struct{}) {
 			}
 			hb.SetMachineName(conn.LocalName)
 			if err := conn.SendPacket(hb); err != nil {
-				slog.Debug("heartbeat send failed", "err", err)
+				// A failed heartbeat means the link is down (interface gone,
+				// peer unreachable). Close the connection so the blocked
+				// RecvPacket in ReceiveLoop returns and the main loop can
+				// reconnect — otherwise we'd sit in a hung read indefinitely.
+				slog.Warn("heartbeat send failed, closing connection to force reconnect", "err", err)
+				_ = conn.Close()
 				return
 			}
 		}

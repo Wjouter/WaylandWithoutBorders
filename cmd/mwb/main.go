@@ -123,28 +123,39 @@ func main() {
 			addr := fmt.Sprintf("%s:%d", cfg.Host, cfg.MessagePort())
 			slog.Info("connecting", "addr", addr)
 
+			// Always report a result (conn or nil) so a failed outbound attempt
+			// doesn't leave the select below blocked forever waiting on inbound.
 			connCh := make(chan *network.Conn, 1)
 			go func() {
 				c, err := network.Connect(addr, cfg.Key, cfg.Name, 10*time.Second)
 				if err != nil {
 					slog.Debug("outbound connect failed", "err", err)
+					connCh <- nil
 					return
 				}
-				// Non-blocking send: if inbound already won the race, close this conn
-				select {
-				case connCh <- c:
-				default:
-					_ = c.Close()
-				}
+				connCh <- c
 			}()
 
 			// Wait for either outbound or inbound connection
 			var conn *network.Conn
 			select {
 			case conn = <-connCh:
+				if conn == nil {
+					// Outbound failed (interface down, host unreachable). Back off
+					// briefly and retry — the loop keeps listening for inbound too.
+					time.Sleep(2 * time.Second)
+					continue
+				}
 				slog.Info("connected (outbound)", "remote", conn.RemoteName)
 			case conn = <-incomingCh:
 				slog.Info("connected (inbound)", "remote", conn.RemoteName)
+				// The outbound goroutine is still dialing; reap whatever it returns
+				// so a late-succeeding connection isn't leaked.
+				go func(ch chan *network.Conn) {
+					if c := <-ch; c != nil {
+						_ = c.Close()
+					}
+				}(connCh)
 			}
 
 			// Start clipboard sharing on the auto-detected display unless disabled.
@@ -229,7 +240,7 @@ func main() {
 			}
 
 			_ = conn.Close()
-			slog.Info("disconnected, will reconnect in 100ms")
+			slog.Info("disconnected, reconnecting")
 		}
 	}()
 
