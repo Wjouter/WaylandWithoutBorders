@@ -269,19 +269,49 @@ func (m *Manager) sendClipboard() {
 	}
 }
 
-// sendText sends text to the remote via ClipboardText packets. Serialized
-// against sendImage: an overlapping concurrent send would interleave the two
-// packet sequences on the wire, corrupting both on the receiving end.
+// clipTextPayload formats clipboard text the way the Windows MWB receiver
+// expects: "TXT" + text + separator. The trailing GUID separator is required,
+// not cosmetic. The receiver reads its whole decompress buffer, and .NET's
+// DeflateStream leaves replayed window bytes just past the real data; the
+// separator makes those bytes a trailing split segment MWB discards
+// (Split(TEXT_TYPE_SEP, RemoveEmptyEntries)) rather than appending them to the
+// pasted text. Without it, pasting yields the text with a garbage suffix. This
+// is why MWB's own multi-format payloads stay clean.
+func clipTextPayload(text string) string {
+	return "TXT" + text + textTypeSep
+}
+
+// chunkPackets splits compressed clipboard data into 48-byte ClipboardText/
+// ClipboardImage packets (last chunk zero-padded, matching MWB) followed by a
+// ClipboardDataEnd marker — the full sequence the Windows receiver reads as one
+// contiguous run.
+func (m *Manager) chunkPackets(data []byte, dataType protocol.PackageType) []*protocol.Packet {
+	var pkts []*protocol.Packet
+	for offset := 0; offset < len(data); offset += dataSize {
+		end := offset + dataSize
+		if end > len(data) {
+			end = len(data)
+		}
+		pkt := &protocol.Packet{Type: dataType, Src: m.conn.MachineID, Des: protocol.IDAll}
+		pkt.ClipboardData = make([]byte, dataSize) // zero-padded to 48
+		copy(pkt.ClipboardData, data[offset:end])
+		pkts = append(pkts, pkt)
+	}
+	endPkt := &protocol.Packet{Type: protocol.ClipboardDataEnd, Src: m.conn.MachineID, Des: protocol.IDAll}
+	endPkt.ClipboardData = make([]byte, dataSize)
+	return append(pkts, endPkt)
+}
+
+// sendText sends text to the remote via ClipboardText packets. The chunk+end
+// sequence is sent atomically (see Conn.SendPackets): any packet interleaved
+// mid-sequence corrupts the result on the Windows side. Serialized against
+// sendImage via sendMu so two clipboard messages can't overlap either.
 func (m *Manager) sendText(text string) {
 	m.sendMu.Lock()
 	defer m.sendMu.Unlock()
-	// Prepend format marker: "TXT" + text
-	// MWB uses multi-format with GUID separator, but for simplicity we just send TXT
-	markedText := "TXT" + text
-	utf16 := encodeUTF16LE(markedText)
 
 	// Deflate compress
-	compressed, err := deflateCompress(utf16)
+	compressed, err := deflateCompress(encodeUTF16LE(clipTextPayload(text)))
 	if err != nil {
 		slog.Error("clipboard compress failed", "err", err)
 		return
@@ -292,42 +322,10 @@ func (m *Manager) sendText(text string) {
 		return
 	}
 
-	// Chunk into 48-byte packets
-	for offset := 0; offset < len(compressed); offset += dataSize {
-		end := offset + dataSize
-		if end > len(compressed) {
-			end = len(compressed)
-		}
-		chunk := compressed[offset:end]
-
-		pkt := &protocol.Packet{
-			Type: protocol.ClipboardText,
-			Src:  m.conn.MachineID,
-			Des:  protocol.IDAll,
-		}
-		// Copy chunk into packet payload (bytes 16-63)
-		// We need to set the raw bytes — use Mouse fields as overlay
-		// The packet Marshal will handle this via the ClipboardText case
-		pkt.ClipboardData = make([]byte, dataSize)
-		copy(pkt.ClipboardData, chunk)
-
-		if err := m.conn.SendPacket(pkt); err != nil {
-			slog.Error("send clipboard chunk failed", "err", err)
-			return
-		}
+	if err := m.conn.SendPackets(m.chunkPackets(compressed, protocol.ClipboardText)); err != nil {
+		slog.Error("send clipboard text failed", "err", err)
+		return
 	}
-
-	// Send end marker
-	endPkt := &protocol.Packet{
-		Type: protocol.ClipboardDataEnd,
-		Src:  m.conn.MachineID,
-		Des:  protocol.IDAll,
-	}
-	endPkt.ClipboardData = make([]byte, dataSize)
-	if err := m.conn.SendPacket(endPkt); err != nil {
-		slog.Error("send clipboard end failed", "err", err)
-	}
-
 	slog.Info("clipboard sent to remote", "chunks", (len(compressed)+dataSize-1)/dataSize)
 }
 
@@ -557,39 +555,10 @@ func (m *Manager) sendImage(data []byte) {
 		return
 	}
 
-	// Chunk into 48-byte packets
-	for offset := 0; offset < len(data); offset += dataSize {
-		end := offset + dataSize
-		if end > len(data) {
-			end = len(data)
-		}
-		chunk := data[offset:end]
-
-		pkt := &protocol.Packet{
-			Type: protocol.ClipboardImage,
-			Src:  m.conn.MachineID,
-			Des:  protocol.IDAll,
-		}
-		pkt.ClipboardData = make([]byte, dataSize)
-		copy(pkt.ClipboardData, chunk)
-
-		if err := m.conn.SendPacket(pkt); err != nil {
-			slog.Error("send image chunk failed", "err", err)
-			return
-		}
+	if err := m.conn.SendPackets(m.chunkPackets(data, protocol.ClipboardImage)); err != nil {
+		slog.Error("send image failed", "err", err)
+		return
 	}
-
-	// End marker
-	endPkt := &protocol.Packet{
-		Type: protocol.ClipboardDataEnd,
-		Src:  m.conn.MachineID,
-		Des:  protocol.IDAll,
-	}
-	endPkt.ClipboardData = make([]byte, dataSize)
-	if err := m.conn.SendPacket(endPkt); err != nil {
-		slog.Error("send clipboard end failed", "err", err)
-	}
-
 	slog.Info("image clipboard sent to remote", "chunks", (len(data)+dataSize-1)/dataSize)
 }
 

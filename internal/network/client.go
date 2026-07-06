@@ -286,6 +286,31 @@ func (c *Conn) SendPacket(p *protocol.Packet) error {
 	return err
 }
 
+// SendPackets writes several packets back-to-back under a single hold of the
+// send lock, so no other goroutine's packet can interleave between them on the
+// wire. Clipboard text/image is a multi-packet sequence (chunks + end marker)
+// that the Windows receiver reads as one contiguous run; an injected input or
+// heartbeat packet mid-sequence — or worse, a second clipboard message's
+// chunks — makes the receiver's concatenating deflate decoder splice the two,
+// corrupting the result. Keep such sequences atomic on the wire.
+func (c *Conn) SendPackets(pkts []*protocol.Packet) error {
+	c.sendMu.Lock()
+	defer c.sendMu.Unlock()
+	for _, p := range pkts {
+		if c.nextID.Load() >= 0x7FFFFF00 {
+			c.nextID.Store(0)
+		}
+		p.ID = c.nextID.Add(1)
+		buf := p.Marshal()
+		protocol.StampPacket(buf, c.magic)
+		_ = c.raw.SetWriteDeadline(time.Now().Add(500 * time.Millisecond))
+		if _, err := c.enc.Write(buf); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // RecvPacket reads, validates, and unmarshals a packet.
 func (c *Conn) RecvPacket() (*protocol.Packet, error) {
 	buf := make([]byte, protocol.PacketSize)
