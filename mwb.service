@@ -1,23 +1,28 @@
 [Unit]
 Description=Mouse Without Borders Linux client (bidirectional)
-After=network-online.target graphical.target
-Wants=network-online.target
+# Start only once the graphical session is fully up. This is critical: the
+# Wayland environment (WAYLAND_DISPLAY, XDG_SESSION_TYPE) is imported into the
+# systemd user manager by the session, not at login. Starting earlier (e.g.
+# WantedBy=default.target) makes mwb see only DISPLAY=:0, wrongly take the X11
+# capture path, and can arm input capture before the desktop has rendered —
+# which locked the session at login. PartOf ties our lifecycle to the session
+# so we also stop cleanly on logout.
+After=graphical-session.target
+PartOf=graphical-session.target
 
 [Service]
 Type=simple
-# DISPLAY and XAUTHORITY are auto-detected by the mwb binary at startup.
-# Override here only if auto-detection fails for your setup.
-# Environment=DISPLAY=:1
-# Environment=XAUTHORITY=/run/user/1000/gdm/Xauthority
+# All settings (edge, bidirectional, etc.) come from config.toml so the GUI can
+# change them without editing this unit. Set `bidirectional = true` in config
+# to enable bidirectional mode. DISPLAY/WAYLAND_DISPLAY are inherited from the
+# graphical session (see After=graphical-session.target); the mwb binary picks
+# the Wayland portal or X11 path from that environment.
 # %h is the home of the user running this --user unit, matching where
 # `make install` places the binary ($HOME/go/bin/mwb). The system-wide
 # installer (scripts/install.sh) ships its own unit pointing at /usr/local/bin.
-# All settings (edge, bidirectional, etc.) come from config.toml so the GUI can
-# change them without editing this unit. Set `bidirectional = true` in config
-# to enable bidirectional mode.
 ExecStart=%h/go/bin/mwb
 Restart=on-failure
 RestartSec=5
 
 [Install]
-WantedBy=default.target
+WantedBy=graphical-session.target

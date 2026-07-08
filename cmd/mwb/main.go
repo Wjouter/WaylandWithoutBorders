@@ -250,6 +250,21 @@ func main() {
 
 // isWayland reports whether we're running under a Wayland session, in which
 // case the X11 xdotool/xinput bidi path won't work and we use the portal driver.
+//
+// Env vars alone are unreliable: a --user service can start with a sparse
+// environment (only DISPLAY=:0 from XWayland) before the session imports
+// WAYLAND_DISPLAY, and would then wrongly take the X11 path. So also probe for a
+// live Wayland socket in XDG_RUNTIME_DIR. Failing toward Wayland is the safe
+// choice — a portal error just disables capture, whereas the X11 path can grab
+// input and lock the session.
 func isWayland() bool {
-	return os.Getenv("XDG_SESSION_TYPE") == "wayland" || os.Getenv("WAYLAND_DISPLAY") != ""
+	if os.Getenv("XDG_SESSION_TYPE") == "wayland" || os.Getenv("WAYLAND_DISPLAY") != "" {
+		return true
+	}
+	if dir := os.Getenv("XDG_RUNTIME_DIR"); dir != "" {
+		if socks, _ := filepath.Glob(filepath.Join(dir, "wayland-[0-9]*")); len(socks) > 0 {
+			return true
+		}
+	}
+	return false
 }
