@@ -26,3 +26,29 @@ func TestClipTextPayloadHasTrailingSeparator(t *testing.T) {
 		t.Errorf("unexpected inner text %q", inner)
 	}
 }
+
+func TestExtractClipboardText(t *testing.T) {
+	sep := textTypeSep
+	cases := []struct{ name, raw, want string }{
+		{"plain txt section", "TXThello" + sep, "hello"},
+		{"bare text no markers", "just some text", "just some text"},
+		{"txt preferred over rich", "TXTdef" + sep + "RTF{\\rtf1 x}" + sep + "HTM<b>y</b>" + sep, "def"},
+		// The real bug: JetBrains sends RTF+HTML but no TXT section. We must
+		// recover "def" from HTML rather than paste the whole marked-up blob.
+		{
+			"rtf+html only, no txt (jetbrains)",
+			"RTF{\\rtf1\\ansi\\deff0{\\colortbl;}\ndef\\par}" + sep +
+				"HTMVersion:1.0\r\nStartHTML:0000000128\r\nSourceURL:about:blank\r\n" +
+				`<html><body><pre><span style="color:#cf8e6d;">def</span></pre></body></html>` + sep,
+			"def",
+		},
+		{"html entities unescaped", "HTM<p>a &amp; b &lt;c&gt;</p>" + sep, "a & b <c>"},
+		{"rtf only", "RTF{\\rtf1\\ansi{\\fonttbl{\\f0 Arial;}}\\f0 hello\\par}" + sep, "hello"},
+		{"empty txt section falls through, not blob", "TXT" + sep + "HTM<i>hi</i>" + sep, "hi"},
+	}
+	for _, c := range cases {
+		if got := extractClipboardText(c.raw); got != c.want {
+			t.Errorf("%s: extractClipboardText = %q, want %q", c.name, got, c.want)
+		}
+	}
+}

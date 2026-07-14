@@ -12,6 +12,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
+	"html"
 	"io"
 	"log/slog"
 	"os"
@@ -382,22 +383,8 @@ func (m *Manager) handleEnd(pkt *protocol.Packet) {
 		return
 	}
 
-	// Decode UTF-16LE to string
-	text := decodeUTF16LE(decompressed)
-
-	// Parse multi-format: split on TEXT_TYPE_SEP, find TXT section
-	parts := strings.Split(text, textTypeSep)
-	plainText := ""
-	for _, part := range parts {
-		if strings.HasPrefix(part, "TXT") {
-			plainText = strings.TrimPrefix(part, "TXT")
-			break
-		}
-	}
-	if plainText == "" && len(parts) > 0 {
-		plainText = text
-	}
-
+	// Decode UTF-16LE, then extract plain text from the multi-format payload.
+	plainText := extractClipboardText(decodeUTF16LE(decompressed))
 	if plainText == "" {
 		return
 	}
@@ -508,7 +495,12 @@ func (m *Manager) setLocalClipboard(text string) {
 		{"xsel", "--clipboard", "--input"},
 	}
 	if onWayland() {
-		cmds = [][]string{{"wl-copy"}}
+		// --type text/plain is required: without it wl-copy runs xdg-mime on the
+		// content to guess a type, and code-like text (e.g. "def ...") gets tagged
+		// application/x-ruby and offered as *only* that. Apps requesting
+		// text/plain(;charset=utf-8) — Kate, Chromium — then paste nothing.
+		// Forcing text/plain makes wl-copy offer the full standard alias set.
+		cmds = [][]string{{"wl-copy", "--type", "text/plain"}}
 	}
 	for _, args := range cmds {
 		ctx, cancel := context.WithTimeout(context.Background(), execTimeout)
@@ -560,6 +552,125 @@ func (m *Manager) sendImage(data []byte) {
 		return
 	}
 	slog.Info("image clipboard sent to remote", "chunks", (len(data)+dataSize-1)/dataSize)
+}
+
+// extractClipboardText pulls plain text out of MWB's multi-format clipboard
+// payload: sections "TXT"/"RTF"/"HTM" each followed by textTypeSep (see the
+// Windows sender in FormHelper.GetClipboardText). Plain text is preferred, but
+// rich apps (IDEs) sometimes send only RTF+HTML with no TXT section — so fall
+// back to stripping HTML, then RTF, rather than dumping the raw marked-up blob
+// onto the clipboard.
+func extractClipboardText(raw string) string {
+	var txt, rtf, htm string
+	seen := false
+	for _, part := range strings.Split(raw, textTypeSep) {
+		switch {
+		case strings.HasPrefix(part, "TXT"):
+			txt, seen = part[3:], true
+		case strings.HasPrefix(part, "RTF"):
+			rtf, seen = part[3:], true
+		case strings.HasPrefix(part, "HTM"):
+			htm, seen = part[3:], true
+		}
+	}
+	if txt != "" {
+		return txt
+	}
+	if htm != "" {
+		if s := strings.TrimSpace(htmlToText(htm)); s != "" {
+			return s
+		}
+	}
+	if rtf != "" {
+		if s := strings.TrimSpace(rtfToText(rtf)); s != "" {
+			return s
+		}
+	}
+	// No recognizable section marker at all: treat as bare plain text from a
+	// simple sender. If markers were present but unextractable, return empty
+	// rather than pasting the marked-up blob.
+	if !seen {
+		return raw
+	}
+	return ""
+}
+
+// htmlToText strips a CF_HTML section down to its text: drop the CF_HTML header
+// (everything before the first tag), remove tags, and unescape entities.
+func htmlToText(h string) string {
+	if i := strings.IndexByte(h, '<'); i >= 0 {
+		h = h[i:]
+	}
+	var b strings.Builder
+	inTag := false
+	for _, r := range h {
+		switch {
+		case r == '<':
+			inTag = true
+		case r == '>':
+			inTag = false
+		case !inTag:
+			b.WriteRune(r)
+		}
+	}
+	return html.UnescapeString(b.String())
+}
+
+// rtfToText does a minimal RTF strip: \par/\line become newlines, other control
+// words and the font/color tables are dropped, leaving the literal characters.
+// ponytail: a naive stripper, not a full RTF parser — good enough to recover the
+// pasted text when only RTF is offered; HTML is the primary rich fallback above.
+func rtfToText(s string) string {
+	var b strings.Builder
+	depth, skipGroup := 0, -1
+	i := 0
+	for i < len(s) {
+		c := s[i]
+		switch c {
+		case '{':
+			depth++
+			i++
+		case '}':
+			if skipGroup == depth {
+				skipGroup = -1
+			}
+			depth--
+			i++
+		case '\\':
+			// Control word or symbol.
+			j := i + 1
+			for j < len(s) && ((s[j] >= 'a' && s[j] <= 'z') || (s[j] >= 'A' && s[j] <= 'Z')) {
+				j++
+			}
+			word := s[i+1 : j]
+			// optional numeric parameter
+			for j < len(s) && (s[j] == '-' || (s[j] >= '0' && s[j] <= '9')) {
+				j++
+			}
+			if j < len(s) && s[j] == ' ' {
+				j++ // a single trailing space delimits the control word
+			}
+			switch word {
+			case "par", "line":
+				b.WriteByte('\n')
+			case "tab":
+				b.WriteByte('\t')
+			case "fonttbl", "colortbl", "stylesheet", "pict", "object", "info":
+				skipGroup = depth // skip this whole group's contents
+			}
+			if word == "" && i+1 < len(s) { // control symbol like \' or \~
+				i += 2
+				continue
+			}
+			i = j
+		default:
+			if skipGroup == -1 && c != '\r' && c != '\n' {
+				b.WriteByte(c)
+			}
+			i++
+		}
+	}
+	return b.String()
 }
 
 // encodeUTF16LE encodes a Go string to UTF-16LE bytes.
