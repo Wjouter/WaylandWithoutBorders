@@ -16,6 +16,7 @@ type MockInputDevice struct {
 	Wheels      []int32
 	KeyDowns    []uint16
 	KeyUps      []uint16
+	held        []uint16
 }
 
 func (m *MockInputDevice) MoveTo(x, y int32) error {
@@ -39,11 +40,28 @@ func (m *MockInputDevice) HWheel(delta int32) error {
 }
 func (m *MockInputDevice) KeyDown(code uint16) error {
 	m.KeyDowns = append(m.KeyDowns, code)
+	m.held = append(m.held, code)
 	return nil
 }
 func (m *MockInputDevice) KeyUp(code uint16) error {
 	m.KeyUps = append(m.KeyUps, code)
+	m.removeHeld(code)
 	return nil
+}
+func (m *MockInputDevice) ReleaseAll() error {
+	for _, code := range m.held {
+		m.KeyUps = append(m.KeyUps, code)
+	}
+	m.held = nil
+	return nil
+}
+func (m *MockInputDevice) removeHeld(code uint16) {
+	for i, c := range m.held {
+		if c == code {
+			m.held = append(m.held[:i], m.held[i+1:]...)
+			return
+		}
+	}
 }
 
 func TestHandleMouseMove(t *testing.T) {
@@ -149,6 +167,45 @@ func TestHandleKeyboard(t *testing.T) {
 	h.HandlePacket(pkt)
 	if len(mock.KeyUps) != 1 || mock.KeyUps[0] != expectedCode {
 		t.Errorf("expected keycode %d up, got %v", expectedCode, mock.KeyUps)
+	}
+}
+
+// A modifier held when the cursor leaves us (HideMouse) must be released — its
+// key-up happens on the remote and never reaches us. Same for a switch-away.
+func TestHeldKeyReleasedOnLeave(t *testing.T) {
+	shift, ok := input.VKToKeyCode(0xA0) // VK_LSHIFT
+	if !ok {
+		t.Fatal("VKToKeyCode(VK_LSHIFT) should map")
+	}
+	for _, leave := range []protocol.PackageType{protocol.HideMouse, protocol.MachineSwitched} {
+		mock := &MockInputDevice{}
+		h := &Handler{Mouse: mock, Keyboard: mock}
+
+		down := &protocol.Packet{Type: protocol.Keyboard}
+		down.Keyboard.WVk = 0xA0
+		h.HandlePacket(down) // Shift down, no matching up
+
+		h.HandlePacket(&protocol.Packet{Type: leave})
+
+		if len(mock.KeyUps) != 1 || mock.KeyUps[0] != shift {
+			t.Errorf("%v: expected Shift (%d) released, got %v", leave, shift, mock.KeyUps)
+		}
+	}
+}
+
+// ReleaseHeldKeys (called on disconnect) must lift a stuck modifier too.
+func TestReleaseHeldKeysOnDisconnect(t *testing.T) {
+	shift, _ := input.VKToKeyCode(0xA0)
+	mock := &MockInputDevice{}
+	h := &Handler{Mouse: mock, Keyboard: mock}
+	down := &protocol.Packet{Type: protocol.Keyboard}
+	down.Keyboard.WVk = 0xA0
+	h.HandlePacket(down)
+
+	h.ReleaseHeldKeys()
+
+	if len(mock.KeyUps) != 1 || mock.KeyUps[0] != shift {
+		t.Errorf("expected Shift (%d) released on disconnect, got %v", shift, mock.KeyUps)
 	}
 }
 

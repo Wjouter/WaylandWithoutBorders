@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"os"
+	"sync"
 	"syscall"
 	"unsafe"
 )
@@ -260,9 +261,14 @@ func (m *VirtualMouse) Close() error {
 	return m.fd.Close()
 }
 
-// VirtualKeyboard is a uinput keyboard device.
+// VirtualKeyboard is a uinput keyboard device. It tracks currently-pressed keys
+// so ReleaseAll can lift any left held when a session ends (screen switch or
+// disconnect) — otherwise a modifier whose key-up happened on the remote never
+// reaches us and stays stuck down.
 type VirtualKeyboard struct {
-	fd *os.File
+	fd      *os.File
+	mu      sync.Mutex
+	pressed map[uint16]bool
 }
 
 // CreateVirtualKeyboard creates a virtual keyboard supporting all standard keys.
@@ -306,7 +312,7 @@ func CreateVirtualKeyboard(name string) (*VirtualKeyboard, error) {
 	}
 
 	ok = true
-	return &VirtualKeyboard{fd: fd}, nil
+	return &VirtualKeyboard{fd: fd, pressed: make(map[uint16]bool)}, nil
 }
 
 // KeyDown presses a key identified by its evdev keycode.
@@ -314,6 +320,9 @@ func (k *VirtualKeyboard) KeyDown(code uint16) error {
 	if err := writeEvent(k.fd, evKey, code, 1); err != nil {
 		return err
 	}
+	k.mu.Lock()
+	k.pressed[code] = true
+	k.mu.Unlock()
 	return syncEvents(k.fd)
 }
 
@@ -322,7 +331,36 @@ func (k *VirtualKeyboard) KeyUp(code uint16) error {
 	if err := writeEvent(k.fd, evKey, code, 0); err != nil {
 		return err
 	}
+	k.mu.Lock()
+	delete(k.pressed, code)
+	k.mu.Unlock()
 	return syncEvents(k.fd)
+}
+
+// ReleaseAll lifts every key currently held down. Called when the cursor leaves
+// this machine or the connection drops, so a modifier whose key-up never
+// arrived (it happened on the remote) doesn't stay stuck.
+func (k *VirtualKeyboard) ReleaseAll() error {
+	k.mu.Lock()
+	codes := make([]uint16, 0, len(k.pressed))
+	for code := range k.pressed {
+		codes = append(codes, code)
+	}
+	k.pressed = make(map[uint16]bool)
+	k.mu.Unlock()
+
+	var firstErr error
+	for _, code := range codes {
+		if err := writeEvent(k.fd, evKey, code, 0); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	if len(codes) > 0 {
+		if err := syncEvents(k.fd); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
 }
 
 // Close destroys the virtual device and closes the file descriptor.

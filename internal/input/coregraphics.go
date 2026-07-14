@@ -49,6 +49,7 @@ import "C"
 
 import (
 	"fmt"
+	"sync"
 )
 
 // VirtualMouse injects mouse events via CoreGraphics.
@@ -137,13 +138,17 @@ func (m *VirtualMouse) Close() error {
 	return nil
 }
 
-// VirtualKeyboard injects keyboard events via CoreGraphics.
-type VirtualKeyboard struct{}
+// VirtualKeyboard injects keyboard events via CoreGraphics. It tracks held keys
+// so ReleaseAll can lift any left pressed when a session ends.
+type VirtualKeyboard struct {
+	mu      sync.Mutex
+	pressed map[uint16]bool
+}
 
 // CreateVirtualKeyboard creates a virtual keyboard that posts CoreGraphics events.
 // The name parameter is accepted for API compatibility but unused on macOS.
 func CreateVirtualKeyboard(name string) (*VirtualKeyboard, error) {
-	return &VirtualKeyboard{}, nil
+	return &VirtualKeyboard{pressed: make(map[uint16]bool)}, nil
 }
 
 // KeyDown presses a key identified by its macOS virtual keycode.
@@ -151,6 +156,9 @@ func (k *VirtualKeyboard) KeyDown(code uint16) error {
 	if C.postKeyEvent(C.CGKeyCode(code), 1) != 0 {
 		return fmt.Errorf("failed to post key down event")
 	}
+	k.mu.Lock()
+	k.pressed[code] = true
+	k.mu.Unlock()
 	return nil
 }
 
@@ -159,7 +167,28 @@ func (k *VirtualKeyboard) KeyUp(code uint16) error {
 	if C.postKeyEvent(C.CGKeyCode(code), 0) != 0 {
 		return fmt.Errorf("failed to post key up event")
 	}
+	k.mu.Lock()
+	delete(k.pressed, code)
+	k.mu.Unlock()
 	return nil
+}
+
+// ReleaseAll lifts every key currently held down.
+func (k *VirtualKeyboard) ReleaseAll() error {
+	k.mu.Lock()
+	codes := make([]uint16, 0, len(k.pressed))
+	for code := range k.pressed {
+		codes = append(codes, code)
+	}
+	k.pressed = make(map[uint16]bool)
+	k.mu.Unlock()
+	var firstErr error
+	for _, code := range codes {
+		if C.postKeyEvent(C.CGKeyCode(code), 0) != 0 && firstErr == nil {
+			firstErr = fmt.Errorf("failed to release key %d", code)
+		}
+	}
+	return firstErr
 }
 
 // Close is a no-op on macOS.

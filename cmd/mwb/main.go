@@ -228,6 +228,10 @@ func main() {
 				slog.Error("receive loop error", "err", err)
 			}
 
+			// The link just dropped — release any key still held from an
+			// in-flight keypress so a modifier doesn't stay stuck down.
+			handler.ReleaseHeldKeys()
+
 			// Stop capture first — prevents in-flight SendPacket after conn.Close()
 			if capStop != nil {
 				capStop() // Wayland: tears down the portal + libei

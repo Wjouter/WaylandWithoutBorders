@@ -23,6 +23,10 @@ type MouseDevice interface {
 type KeyboardDevice interface {
 	KeyDown(code uint16) error
 	KeyUp(code uint16) error
+	// ReleaseAll lifts every currently-held key. Called when the cursor leaves
+	// this machine or the connection drops so a modifier whose key-up never
+	// arrived doesn't stay stuck down.
+	ReleaseAll() error
 }
 
 // ClipboardHandler handles clipboard packets.
@@ -63,11 +67,17 @@ func (h *Handler) HandlePacket(pkt *protocol.Packet) {
 		now := time.Now()
 		h.ActivatedAt = &now
 		h.inSeeded = false // reseed inbound tracker so the entry move snaps, not scales
+		// Clear any key stuck down from a prior session before this one starts.
+		h.releaseAllKeys()
 		if h.OnActivated != nil {
 			h.OnActivated()
 		}
 	case protocol.HideMouse:
 		slog.Debug("HideMouse received — cursor leaving us", "src", pkt.Src)
+		// Cursor is leaving us: release held keys now, because any key-up will
+		// happen on the remote and never reach us (mirrors MWB's ReleaseAllKeys
+		// on HideMouse). Without this, a held modifier stays stuck down.
+		h.releaseAllKeys()
 	case protocol.NextMachine:
 		slog.Info("NextMachine received — server wants us to take cursor back",
 			"src", pkt.Src, "des", pkt.Des, "targetID", pkt.Mouse.WheelDelta)
@@ -216,6 +226,20 @@ func clamp65535(v int32) int32 {
 		return 65535
 	}
 	return v
+}
+
+// ReleaseHeldKeys lifts any keys currently held on the virtual keyboard. Called
+// from the connection loop on disconnect so a dropped link doesn't strand a
+// modifier down.
+func (h *Handler) ReleaseHeldKeys() { h.releaseAllKeys() }
+
+func (h *Handler) releaseAllKeys() {
+	if h.Keyboard == nil {
+		return
+	}
+	if err := h.Keyboard.ReleaseAll(); err != nil {
+		slog.Debug("release all keys failed", "err", err)
+	}
 }
 
 func (h *Handler) handleKeyboard(pkt *protocol.Packet) {
