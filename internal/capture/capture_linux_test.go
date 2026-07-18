@@ -147,6 +147,58 @@ func TestSafeEntryPosition_RightEdge(t *testing.T) {
 	}
 }
 
+func TestAcceptsReclaim_LeftEdgeOnlyAcceptsLocalLeftLanding(t *testing.T) {
+	c := &Capturer{edgeSide: "left"}
+	if !c.AcceptsReclaim(1200) {
+		t.Fatal("left-edge setup should accept a NextMachine landing near local left edge")
+	}
+	if c.AcceptsReclaim(65000) {
+		t.Fatal("left-edge setup must reject far-right landing from the remote's far-left edge")
+	}
+}
+
+func TestAcceptsReclaim_RightEdgeOnlyAcceptsLocalRightLanding(t *testing.T) {
+	c := &Capturer{edgeSide: "right"}
+	if !c.AcceptsReclaim(65000) {
+		t.Fatal("right-edge setup should accept a NextMachine landing near local right edge")
+	}
+	if c.AcceptsReclaim(1200) {
+		t.Fatal("right-edge setup must reject far-left landing from the remote's far-right edge")
+	}
+}
+
+// AcceptsActivation keys on activeEdge (the edge crossed into the remote on)
+// and our normalized 0..normMax remote-cursor space, mirroring switchBack.
+func TestAcceptsActivation_LeftEdgeOnlyAcceptsRemoteReturnEdge(t *testing.T) {
+	c := &Capturer{active: false, activeEdge: "left", remoteX: normMax - 1}
+	if !c.AcceptsActivation() {
+		t.Fatal("left entry should accept MachineSwitched at the far/return edge")
+	}
+	c.remoteX = normMax - switchMargin
+	if c.AcceptsActivation() {
+		t.Fatal("left entry must reject MachineSwitched at the entry offset")
+	}
+	c.remoteX = 0
+	if c.AcceptsActivation() {
+		t.Fatal("left entry must reject MachineSwitched from the remote's opposite edge")
+	}
+}
+
+func TestAcceptsActivation_RightEdgeOnlyAcceptsRemoteReturnEdge(t *testing.T) {
+	c := &Capturer{active: false, activeEdge: "right", remoteX: 0}
+	if !c.AcceptsActivation() {
+		t.Fatal("right entry should accept MachineSwitched at the return edge (0)")
+	}
+	c.remoteX = switchMargin
+	if c.AcceptsActivation() {
+		t.Fatal("right entry must reject MachineSwitched at the entry offset")
+	}
+	c.remoteX = normMax - 1
+	if c.AcceptsActivation() {
+		t.Fatal("right entry must reject MachineSwitched from the remote's opposite edge")
+	}
+}
+
 // --- SetActive mutex invariant ---
 
 // SetActive must NOT hold c.mu when calling enableXinput.

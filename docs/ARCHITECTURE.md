@@ -182,10 +182,23 @@ Server sends Matrix|Hi (type 130 = 128|2) packets. We must respond with Hello to
 
 With "Move mouse relatively" **OFF** on the server, absolute mode avoids bounce-back issues.
 
-### 6. xinput for Device Isolation
+### 6. Directional Return Handling
+Windows can report a return to Linux either with `MachineSwitched` or
+`NextMachine`. `NextMachine` carries the target machine ID in `Mouse.WheelDelta`
+and the requested landing point in `Mouse.X/Y` using 0-65535 space. The Linux
+client must not blindly reclaim control for every return packet; it should
+accept only requests that match the configured shared edge. For `-edge left`,
+`NextMachine` must land near local X=0 and `MachineSwitched` must arrive when
+the tracked remote cursor is near the remote right edge. For `-edge right`, the
+conditions are reversed. The `MachineSwitched` margin is smaller than the 200px
+remote entry offset so the initial handoff cannot be mistaken for a return.
+This protects against rotated Windows matrix layouts and wrap behavior pulling
+control back from the remote machine's far edge.
+
+### 7. xinput for Device Isolation
 When controlling the remote, `xinput disable` prevents the local device from moving the Ubuntu cursor. `xinput enable` restores it when returning. This is more reliable than EVIOCGRAB which had issues with device restoration.
 
-### 7. Timing and Debouncing
+### 8. Timing and Debouncing
 - **Edge polling**: 10ms ticker (`pollCursorEdge`, `capture_linux.go`)
 - **Switch gating**: `canSwitch`/`canReturn` gates prevent re-trigger loops — no
   time-based cooldown. The cursor must move away from the edge before another
@@ -236,10 +249,10 @@ keyboard_layout = "auto"       # Inbound keyboard mapping profile
 mwb
 
 # Bidirectional (Linux can also control Windows)
-sudo mwb -bidi -edge left
+mwb -bidi -edge left
 
 # With debug logging
-sudo mwb -bidi -edge left -debug
+mwb -bidi -edge left -debug
 ```
 
 ## Requirements
@@ -254,7 +267,9 @@ sudo mwb -bidi -edge left -debug
 - `xdotool` installed (for cursor position polling)
 - `xinput` installed (for device isolation)
 - `xrandr` installed (for screen detection)
-- Run with `sudo` for evdev access, or configure udev rules
+- Configure the udev/input-group access from the installer; avoid `sudo mwb`
+  for normal use because it reads root's config and can miss the user's
+  display/session.
 
 ## Critical Invariants
 
@@ -307,6 +322,14 @@ it arrives at the switch edge (e.g. `x=0` for a left-edge setup). Without
 a `xdotool mousemove` call, the cursor stays at the edge, `canSwitch` never
 arms, and the user's mouse appears frozen. Both callbacks must call
 `SafeEntryPosition()` and move the cursor 100px inside.
+
+### Return packets must be edge-compatible before reclaiming local control
+
+`MachineSwitched`/`NextMachine` can be emitted by Windows when the controlled
+machine touches any matrix neighbor edge. The handler must validate the return
+against the configured Linux `edge` before calling `OnActivated` or
+`OnReclaimed`; otherwise touching the remote machine's far edge can incorrectly
+bring control back to Ubuntu.
 
 ### `Stop()` must drain goroutines before returning
 

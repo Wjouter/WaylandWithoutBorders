@@ -48,6 +48,19 @@ const (
 	// Default speed multiplier on top of proportional (1:1 screen) mapping.
 	// 2.0 ≈ traverse the remote in half a local-screen sweep, matching the old feel.
 	defaultAccelMultiplier = 2.0
+
+	// NextMachine landing requests use MWB's 0-65535 absolute coordinate space.
+	// A legitimate reclaim must land on the local edge that is physically shared
+	// with the remote. The margin is intentionally broad enough for MWB's tiny
+	// 2px jump plus rounding, but narrow enough to reject the opposite far edge.
+	reclaimEdgeMargin = 8192
+
+	// returnEdgeMargin is how close (in normalized 0..normMax units) our
+	// dead-reckoned remote cursor must be to its return edge before we accept a
+	// remote MachineSwitched as a genuine hand-back. It is well inside the
+	// switchMargin entry offset so the initial entry momentum can't be mistaken
+	// for a return.
+	returnEdgeMargin = normMax / 40
 )
 
 type inputEvent struct {
@@ -231,6 +244,51 @@ func (c *Capturer) SafeEntryPosition() (x, y int32) {
 		x = c.screen.Width / 2
 	}
 	return x, y
+}
+
+// AcceptsReclaim reports whether a remote NextMachine request is returning
+// through the edge this Linux screen actually shares with the remote machine.
+func (c *Capturer) AcceptsReclaim(requestX int32) bool {
+	c.mu.Lock()
+	edgeSide := c.edgeSide
+	c.mu.Unlock()
+
+	switch edgeSide {
+	case "left":
+		return requestX <= reclaimEdgeMargin
+	case "right":
+		return requestX >= 65535-reclaimEdgeMargin
+	default:
+		return true
+	}
+}
+
+// AcceptsActivation reports whether a MachineSwitched notification is
+// compatible with the edge this Linux screen shares with the remote. Windows can
+// emit MachineSwitched from the remote machine's far edge if its matrix wraps or
+// is rotated; that must not bring local control back.
+func (c *Capturer) AcceptsActivation() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.active {
+		return true
+	}
+
+	// Accept the hand-back only when our dead-reckoned remote cursor is near the
+	// edge it would legitimately return through — the same geometry switchBack
+	// uses in afterMotionLocked, but keyed to activeEdge (the edge we crossed in
+	// on) rather than raw pixel dimensions we don't track.
+	switch c.activeEdge {
+	case "right":
+		return c.remoteX <= returnEdgeMargin
+	case "top":
+		return c.remoteY >= normMax-returnEdgeMargin
+	case "bottom":
+		return c.remoteY <= returnEdgeMargin
+	default: // left
+		return c.remoteX >= normMax-returnEdgeMargin
+	}
 }
 
 // SetAccelMultiplier sets the scaling applied to raw evdev deltas before they

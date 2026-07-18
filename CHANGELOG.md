@@ -6,6 +6,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-07-02
+
+### Changed
+- Updated CI checkout to `actions/checkout@v7`.
+- Updated `github.com/BurntSushi/toml` from 1.3.2 to 1.6.0.
+
+### Fixed
+- German inbound AltGr chords now drop Windows' synthetic Ctrl event before
+  injecting right Alt, fixing level-3 keys such as `@`, `~`, and `|` (#23).
+- Release `.deb` packages now ship `packaging/mwb.service`, whose
+  `/usr/local/bin/mwb` `ExecStart` matches the packaged binary path.
+- Installed systemd user services now default to receive-only mode (`mwb`)
+  instead of bidirectional mode, preventing surprise Linux → Windows mouse
+  handoff on startup.
+- Installers now remove the legacy root `mwb-linux.service` if present, because
+  it can keep port 15101 bound and force bidirectional mode after an upgrade.
+- **False return from remote far edge**: `MachineSwitched` and `NextMachine`
+  packets are now accepted only when the requested return matches the Linux
+  edge configured by `-edge`. This prevents a remote laptop on Ubuntu's left
+  from handing control back to Ubuntu when the cursor touches the remote
+  laptop's far-left edge because Windows has a rotated matrix or wrap-style
+  behavior.
+
 ## [0.5.0] - 2026-06-29
 
 ### Added
@@ -218,7 +241,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `scripts/install.sh` one-command installer.
 - GitHub Actions CI/CD: automated test, lint, and `.deb` release pipeline.
 
-[Unreleased]: https://github.com/lucky-verma/mwb-linux/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/lucky-verma/mwb-linux/compare/v0.5.1...HEAD
+[0.5.1]: https://github.com/lucky-verma/mwb-linux/compare/v0.5.0...v0.5.1
+[0.5.0]: https://github.com/lucky-verma/mwb-linux/compare/v0.4.1...v0.5.0
 [0.4.1]: https://github.com/lucky-verma/mwb-linux/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/lucky-verma/mwb-linux/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/lucky-verma/mwb-linux/compare/v0.3.0...v0.3.1

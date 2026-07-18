@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/assets/banner.png" alt="MWB Linux — Mouse Without Borders for Linux" width="800">
+  <img src="docs/assets/demo.gif" alt="Cursor crossing from Windows to the Linux machine over Mouse Without Borders" width="720">
 </p>
 
 <p align="center">
@@ -300,6 +300,12 @@ On Wayland the portal suppresses local input automatically. On X11 you need
 
 ### Cursor bounces back immediately
 Set "Move mouse relatively" to OFF in PowerToys MWB settings.
+
+### Cursor returns from the far edge of the other laptop
+Upgrade to a build with directional `MachineSwitched`/`NextMachine` filtering.
+The Linux client should only accept return requests from the edge configured by
+`-edge`; touching the other laptop's far edge should stop there, not bring
+control back to Ubuntu.
 
 ## Project Structure
 

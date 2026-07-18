@@ -40,15 +40,22 @@ type Handler struct {
 	Keyboard    KeyboardDevice
 	Clipboard   ClipboardHandler // optional clipboard handler
 	OnActivated func()           // called when remote sends MachineSwitched
-	OnReclaimed func()           // called when server sends NextMachine (cursor bounced back)
-	ActivatedAt *time.Time       // when cursor last arrived — skip mouse injection briefly
+	// ShouldActivate optionally rejects MachineSwitched packets from the wrong edge.
+	ShouldActivate func() bool
+	OnReclaimed    func() // called when server sends NextMachine from the shared edge
+	// ShouldReclaim optionally rejects NextMachine packets from the wrong edge.
+	ShouldReclaim func(requestX, requestY, targetID int32) bool
+	ActivatedAt   *time.Time // when cursor last arrived — skip mouse injection briefly
 
 	// InboundMultiplier scales Windows->Linux cursor movement. 1.0 = mirror
 	// Windows 1:1 (the default). Inbound is absolute, so this applies a constant
 	// gain to per-packet deltas rather than a true acceleration curve.
 	InboundMultiplier float64
 	// KeyboardLayout selects the inbound Windows VK -> Linux evdev mapping.
-	KeyboardLayout string
+	KeyboardLayout  string
+	pendingCtrl     bool
+	pendingCtrlCode uint16
+	suppressCtrlUp  bool
 	// inbound cursor tracking (single-goroutine receive loop, no lock needed)
 	inX, inY         int32 // current injected absolute position (0-65535)
 	lastInX, lastInY int32 // last absolute position reported by the remote
@@ -57,12 +64,21 @@ type Handler struct {
 
 // HandlePacket dispatches a packet to the appropriate handler.
 func (h *Handler) HandlePacket(pkt *protocol.Packet) {
+	if pkt.Type != protocol.Keyboard {
+		if err := h.flushPendingCtrl(); err != nil {
+			slog.Error("keyboard input error", "err", err)
+		}
+	}
 	switch pkt.Type {
 	case protocol.Mouse:
 		h.handleMouse(pkt)
 	case protocol.Keyboard:
 		h.handleKeyboard(pkt)
 	case protocol.MachineSwitched:
+		if h.ShouldActivate != nil && !h.ShouldActivate() {
+			slog.Debug("MachineSwitched ignored — remote cursor is not on our shared edge", "src", pkt.Src)
+			return
+		}
 		slog.Info("MachineSwitched: cursor switched to us", "src", pkt.Src)
 		now := time.Now()
 		h.ActivatedAt = &now
@@ -79,9 +95,15 @@ func (h *Handler) HandlePacket(pkt *protocol.Packet) {
 		// on HideMouse). Without this, a held modifier stays stuck down.
 		h.releaseAllKeys()
 	case protocol.NextMachine:
-		slog.Info("NextMachine received — server wants us to take cursor back",
-			"src", pkt.Src, "des", pkt.Des, "targetID", pkt.Mouse.WheelDelta)
-		// Server's cursor hit an edge toward us — reclaim local control
+		if h.ShouldReclaim != nil && !h.ShouldReclaim(pkt.Mouse.X, pkt.Mouse.Y, pkt.Mouse.WheelDelta) {
+			slog.Debug("NextMachine ignored — requested landing point is not on our shared edge",
+				"targetID", pkt.Mouse.WheelDelta, "requestX", pkt.Mouse.X, "requestY", pkt.Mouse.Y)
+			return
+		}
+		slog.Info("NextMachine accepted — server wants us to take cursor back",
+			"src", pkt.Src, "des", pkt.Des, "targetID", pkt.Mouse.WheelDelta,
+			"requestX", pkt.Mouse.X, "requestY", pkt.Mouse.Y)
+		// Server's cursor hit the edge shared with us — reclaim local control.
 		if h.OnReclaimed != nil {
 			h.OnReclaimed()
 		}
@@ -234,6 +256,10 @@ func clamp65535(v int32) int32 {
 func (h *Handler) ReleaseHeldKeys() { h.releaseAllKeys() }
 
 func (h *Handler) releaseAllKeys() {
+	// Drop any half-built AltGr chord so a transition mid-chord can't inject a
+	// phantom Ctrl on the next keypress (ReleaseAll below lifts the real keys).
+	h.pendingCtrl = false
+	h.suppressCtrlUp = false
 	if h.Keyboard == nil {
 		return
 	}
@@ -244,13 +270,20 @@ func (h *Handler) releaseAllKeys() {
 
 func (h *Handler) handleKeyboard(pkt *protocol.Packet) {
 	kd := pkt.Keyboard
-	keyCode, ok := input.VKToKeyCodeForLayout(kd.WVk, h.KeyboardLayout)
+	keyCode, ok := h.keyCodeForPacket(kd)
 	if !ok {
 		slog.Debug("unknown VK code", "vk", kd.WVk, "keyboardLayout", h.KeyboardLayout)
 		return
 	}
-	var err error
 	isUp := (kd.DwFlags & protocol.LLKHF_UP) != 0
+	if h.handlePendingCtrl(kd.WVk, kd.DwFlags, keyCode, isUp) {
+		return
+	}
+	if err := h.flushPendingCtrl(); err != nil {
+		slog.Error("keyboard input error", "err", err)
+		return
+	}
+	var err error
 	if isUp {
 		err = h.Keyboard.KeyUp(keyCode)
 	} else {
@@ -259,4 +292,70 @@ func (h *Handler) handleKeyboard(pkt *protocol.Packet) {
 	if err != nil {
 		slog.Error("keyboard input error", "err", err)
 	}
+}
+
+func (h *Handler) flushPendingCtrl() error {
+	if !h.pendingCtrl {
+		return nil
+	}
+	h.pendingCtrl = false
+	return h.Keyboard.KeyDown(h.pendingCtrlCode)
+}
+
+func (h *Handler) keyCodeForPacket(kd protocol.KeyboardData) (uint16, bool) {
+	switch kd.WVk {
+	case 0x10:
+		return input.KEY_LEFTSHIFT, true
+	case 0x11:
+		if kd.DwFlags&protocol.LLKHF_EXTENDED != 0 {
+			return input.KEY_RIGHTCTRL, true
+		}
+		return input.KEY_LEFTCTRL, true
+	case 0x12:
+		if kd.DwFlags&protocol.LLKHF_EXTENDED != 0 {
+			return input.KEY_RIGHTALT, true
+		}
+		return input.KEY_LEFTALT, true
+	default:
+		return input.VKToKeyCodeForLayout(kd.WVk, h.KeyboardLayout)
+	}
+}
+
+func (h *Handler) handlePendingCtrl(vk, flags int32, keyCode uint16, isUp bool) bool {
+	if isCtrlVK(vk) {
+		if isUp {
+			if h.pendingCtrl {
+				h.pendingCtrl = false
+				if err := h.Keyboard.KeyDown(keyCode); err != nil {
+					slog.Error("keyboard input error", "err", err)
+					return true
+				}
+				if err := h.Keyboard.KeyUp(keyCode); err != nil {
+					slog.Error("keyboard input error", "err", err)
+				}
+				return true
+			}
+			if h.suppressCtrlUp {
+				h.suppressCtrlUp = false
+				return true
+			}
+			return false
+		}
+		h.pendingCtrl = true
+		h.pendingCtrlCode = keyCode
+		return true
+	}
+	if !isUp && isRightAltVK(vk, flags) && h.pendingCtrl {
+		h.pendingCtrl = false
+		h.suppressCtrlUp = true
+	}
+	return false
+}
+
+func isCtrlVK(vk int32) bool {
+	return vk == 0x11 || vk == 0xA2 || vk == 0xA3
+}
+
+func isRightAltVK(vk, flags int32) bool {
+	return vk == 0xA5 || (vk == 0x12 && flags&protocol.LLKHF_EXTENDED != 0)
 }

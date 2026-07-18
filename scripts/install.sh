@@ -96,6 +96,15 @@ else
 fi
 
 echo "[6/6] Installing systemd user service..."
+if command -v systemctl >/dev/null 2>&1 && \
+    systemctl list-unit-files --no-legend mwb-linux.service 2>/dev/null | grep -q '^mwb-linux\.service'; then
+    echo "  Removing legacy root mwb-linux.service..."
+    systemctl disable --now mwb-linux.service >/dev/null 2>&1 || true
+    rm -f /etc/systemd/system/mwb-linux.service
+    rm -rf /etc/systemd/system/mwb-linux.service.d
+    systemctl daemon-reload || true
+fi
+
 install -d /etc/systemd/user
 cat > /etc/systemd/user/mwb.service << 'EOF'
 [Unit]
@@ -121,6 +130,7 @@ echo ""
 echo "Next steps:"
 echo "  1. Edit ~/.config/mwb/config.toml with your Windows IP and security key"
 echo "  2. Log out and back in (for group changes)"
-echo "  3. Run: mwb -bidi -edge left"
-echo "  4. Or enable autostart: systemctl --user enable --now mwb"
+echo "  3. Run receive-only: mwb"
+echo "  4. Optional bidirectional mode: mwb -bidi -edge left"
+echo "  5. Or enable receive-only autostart: systemctl --user enable --now mwb"
 echo ""
