@@ -176,3 +176,36 @@ func TestSilentFor(t *testing.T) {
 		t.Fatalf("stale read should exceed liveness timeout, got %v", d)
 	}
 }
+
+func TestSendStallTracker(t *testing.T) {
+	t0 := time.Now()
+	tr := sendStallTracker{lastProgress: t0}
+
+	// Draining queue (returns to 0) keeps resetting progress — never stalled.
+	if tr.stalled(500, t0.Add(1*time.Second)) {
+		t.Fatal("first backed-up sample should not be stalled yet")
+	}
+	if tr.stalled(0, t0.Add(2*time.Second)) {
+		t.Fatal("drained queue must not be stalled")
+	}
+	// After a drain, a long stretch backed-up but still making progress is fine.
+	if tr.stalled(300, t0.Add(3*time.Second)) { // 300 < lastOutQ(0)? no; n>0, progress was 2s
+		t.Fatal("just-started backup should not be stalled")
+	}
+
+	// Now a queue that only grows and never drains past the timeout => stalled.
+	base := t0.Add(100 * time.Second)
+	tr = sendStallTracker{lastProgress: base}
+	tr.stalled(1000, base.Add(1*time.Second)) // arms: progress stays at base
+	if tr.stalled(1200, base.Add(livenessTimeout+2*time.Second)) != true {
+		t.Fatal("queue stuck above zero past livenessTimeout must be flagged stalled")
+	}
+
+	// A drain right before the deadline clears the stall.
+	tr = sendStallTracker{lastProgress: base}
+	tr.stalled(1000, base.Add(1*time.Second))
+	tr.stalled(0, base.Add(livenessTimeout)) // drained
+	if tr.stalled(50, base.Add(livenessTimeout+1*time.Second)) {
+		t.Fatal("a drain must reset the stall clock")
+	}
+}

@@ -17,24 +17,52 @@ import (
 // unblocks RecvPacket so the main loop reconnects.
 const livenessTimeout = 15 * time.Second
 
+// sendStallTracker flags when the socket send queue has been backed up (peer not
+// reading) continuously past livenessTimeout. A healthy link drains the queue,
+// refreshing lastProgress; a legitimate large transfer also drains over time, so
+// only a genuine stall trips it.
+type sendStallTracker struct {
+	lastProgress time.Time
+	lastOutQ     int
+}
+
+// stalled records the current send-queue depth n and reports whether the queue
+// has stayed non-empty and non-draining longer than livenessTimeout.
+func (t *sendStallTracker) stalled(n int, now time.Time) bool {
+	if n == 0 || n < t.lastOutQ {
+		t.lastProgress = now
+	}
+	t.lastOutQ = n
+	return n > 0 && now.Sub(t.lastProgress) > livenessTimeout
+}
+
 // startHeartbeat sends periodic heartbeats to keep the connection alive.
 // Windows MWB drops clients that don't send heartbeats within ~10s.
 func startHeartbeat(conn *Conn, stop chan struct{}) {
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
+
+	// Send-stall tracking: when the peer stops reading our data (its receive
+	// window closes after a lock/suspend) but keeps sending its own, the receive
+	// side stays live yet our send queue never drains — an asymmetric half-open
+	// the receive-side check can't see.
+	sendStall := sendStallTracker{lastProgress: time.Now()}
 	for {
 		select {
 		case <-stop:
 			return
 		case <-ticker.C:
 			if d := conn.silentFor(time.Now()); d > livenessTimeout {
-				// Peer went silent: no heartbeat reply, no data. The send buffer
-				// backs up (Send-Q grows) but SendPacket won't error for minutes,
-				// so detect death via the receive side and force a reconnect.
-				// ponytail: if heavy outbound streaming ever blocks SendPacket
-				// before this fires, add a write deadline in SendPacket too.
+				// Peer went fully silent: no heartbeat reply, no data. Detect
+				// death via the receive side and force a reconnect.
 				slog.Warn("peer silent past liveness timeout, closing connection to force reconnect",
 					"silent_for", d.Round(time.Second))
+				_ = conn.Close()
+				return
+			}
+			if n, ok := outstandingSendBytes(conn.raw); ok && sendStall.stalled(n, time.Now()) {
+				slog.Warn("outbound send stalled past liveness timeout (peer not reading), reconnecting",
+					"queued_bytes", n, "stalled_for", time.Since(sendStall.lastProgress).Round(time.Second))
 				_ = conn.Close()
 				return
 			}
