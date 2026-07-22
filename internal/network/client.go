@@ -25,7 +25,8 @@ type Conn struct {
 	LocalName  string
 	RemoteName string
 	nextID     atomic.Int32
-	sendMu     sync.Mutex // guards enc.Write — CBC mode is not goroutine-safe
+	sendMu     sync.Mutex   // guards enc.Write — CBC mode is not goroutine-safe
+	lastRecv   atomic.Int64 // UnixNano of the last packet read from the peer
 }
 
 // Cached key material — PBKDF2 is expensive (50k iterations), only derive once.
@@ -100,6 +101,7 @@ func setupConn(raw net.Conn, securityKey, machineName string) (*Conn, error) {
 		MachineID: machineID,
 		LocalName: machineName,
 	}
+	c.lastRecv.Store(time.Now().UnixNano())
 
 	if err := c.doHandshake(machineName); err != nil {
 		return nil, fmt.Errorf("handshake: %w", err)
@@ -312,11 +314,26 @@ func (c *Conn) SendPackets(pkts []*protocol.Packet) error {
 }
 
 // RecvPacket reads, validates, and unmarshals a packet.
+// silentFor reports how long since the last packet was read from the peer.
+// Returns 0 before the first read is recorded so a fresh Conn is never judged
+// dead. Drives the heartbeat liveness check.
+func (c *Conn) silentFor(now time.Time) time.Duration {
+	last := c.lastRecv.Load()
+	if last == 0 {
+		return 0
+	}
+	return now.Sub(time.Unix(0, last))
+}
+
 func (c *Conn) RecvPacket() (*protocol.Packet, error) {
 	buf := make([]byte, protocol.PacketSize)
 	if _, err := io.ReadFull(c.dec, buf); err != nil {
 		return nil, fmt.Errorf("read packet: %w", err)
 	}
+	// Any bytes from the peer prove the link is alive — feeds the heartbeat
+	// liveness check so a half-open zombie (peer stops reading/responding, e.g.
+	// after a lock) gets torn down instead of blocking sends forever.
+	c.lastRecv.Store(time.Now().UnixNano())
 
 	if err := protocol.ValidatePacket(buf, c.magic); err != nil {
 		return nil, err

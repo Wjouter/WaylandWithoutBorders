@@ -154,3 +154,25 @@ func TestListenAndAcceptReturnsBindError(t *testing.T) {
 		t.Fatalf("expected nil connection channel on bind error, got %v", connCh)
 	}
 }
+
+func TestSilentFor(t *testing.T) {
+	c := &Conn{}
+	now := time.Now()
+
+	// Fresh Conn (no read recorded) is never judged dead.
+	if d := c.silentFor(now); d != 0 {
+		t.Fatalf("unrecorded lastRecv should report 0 silence, got %v", d)
+	}
+
+	// A recent read is well within the liveness window.
+	c.lastRecv.Store(now.Add(-3 * time.Second).UnixNano())
+	if d := c.silentFor(now); d > livenessTimeout {
+		t.Fatalf("3s-old read should be live, got %v > %v", d, livenessTimeout)
+	}
+
+	// A stale read (peer silent) must exceed the timeout so the link is torn down.
+	c.lastRecv.Store(now.Add(-livenessTimeout - time.Second).UnixNano())
+	if d := c.silentFor(now); d <= livenessTimeout {
+		t.Fatalf("stale read should exceed liveness timeout, got %v", d)
+	}
+}

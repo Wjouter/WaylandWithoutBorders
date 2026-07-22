@@ -10,6 +10,13 @@ import (
 	"github.com/lucky-verma/mwb-linux/internal/protocol"
 )
 
+// livenessTimeout is how long the peer may go completely silent before we treat
+// the link as dead. A healthy Windows MWB sends a heartbeat every ~5s (plus a
+// reply to ours), so three missed intervals means the peer stopped reading and
+// responding — a half-open zombie that TCP still reports as ESTAB. Closing it
+// unblocks RecvPacket so the main loop reconnects.
+const livenessTimeout = 15 * time.Second
+
 // startHeartbeat sends periodic heartbeats to keep the connection alive.
 // Windows MWB drops clients that don't send heartbeats within ~10s.
 func startHeartbeat(conn *Conn, stop chan struct{}) {
@@ -20,6 +27,17 @@ func startHeartbeat(conn *Conn, stop chan struct{}) {
 		case <-stop:
 			return
 		case <-ticker.C:
+			if d := conn.silentFor(time.Now()); d > livenessTimeout {
+				// Peer went silent: no heartbeat reply, no data. The send buffer
+				// backs up (Send-Q grows) but SendPacket won't error for minutes,
+				// so detect death via the receive side and force a reconnect.
+				// ponytail: if heavy outbound streaming ever blocks SendPacket
+				// before this fires, add a write deadline in SendPacket too.
+				slog.Warn("peer silent past liveness timeout, closing connection to force reconnect",
+					"silent_for", d.Round(time.Second))
+				_ = conn.Close()
+				return
+			}
 			hb := &protocol.Packet{
 				Type: protocol.HeartbeatEx,
 				Src:  conn.MachineID,
